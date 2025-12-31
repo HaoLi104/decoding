@@ -28,6 +28,37 @@ def _prepare_inputs(tokenizer: AutoTokenizer, prompt: str, device: torch.device)
 
 
 @torch.no_grad()
+def run_single(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompts: Iterable[Tuple[str, Dict]],
+    max_new_tokens: int = 64,
+) -> Tuple[float, List[str]]:
+    """通用单模型评测，可用于领域专家或底座小模型"""
+
+    device = next(model.parameters()).device
+    preds, gts = [], []
+
+    for prompt, raw in prompts:
+        inputs = _prepare_inputs(tokenizer, prompt, device)
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+        text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        ans = extract_answer(text)
+        preds.append(ans)
+        gts.append(raw.get("answer", "").strip().upper())
+
+    accuracy = (
+        sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
+    )
+    return accuracy, preds
+
+
+@torch.no_grad()
 def run_baseline(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,

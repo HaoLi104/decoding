@@ -10,7 +10,7 @@ import torch
 
 from config import RANDOM_SEED
 from data_loader import load_medqa, prepare_batch_prompts
-from evaluator import run_baseline, run_steered
+from evaluator import run_baseline, run_single, run_steered
 from model_loader import get_model_and_tokenizer
 
 
@@ -44,12 +44,17 @@ def main() -> None:
     baseline_acc, _ = run_baseline(models["target"], tokenizer, prompts)
     report_results("Baseline", baseline_acc)
 
+    print("开始 Expert-only 评测 ...")
+    expert_acc, _ = run_single(models["expert"], tokenizer, prompts)
+    report_results("Expert-only", expert_acc)
+
     print("开始 Steered 评测 ...")
     steered_acc, _ = run_steered(models, tokenizer, prompts)
     report_results("Steered", steered_acc)
 
     print("评测完成，对比总结：")
     print(f"- Baseline 准确率: {baseline_acc:.4f}")
+    print(f"- Expert-only 准确率: {expert_acc:.4f}")
     print(f"- Steered  准确率: {steered_acc:.4f}")
 
 
