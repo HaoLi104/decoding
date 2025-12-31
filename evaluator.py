@@ -1,0 +1,134 @@
+"""
+评测逻辑：Baseline 与 Steered 模式的 QA 循环
+"""
+
+import re
+from typing import Dict, Iterable, List, Tuple
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from steering_utils import compute_steered_logits
+
+ANSWER_PATTERN = re.compile(r"\b([A-D])\b", re.IGNORECASE)
+
+
+def extract_answer(text: str) -> str:
+    """从生成文本中提取选项字母"""
+
+    match = ANSWER_PATTERN.search(text)
+    return match.group(1).upper() if match else ""
+
+
+def _prepare_inputs(tokenizer: AutoTokenizer, prompt: str, device: torch.device):
+    """编码 prompt 并移动到指定设备"""
+
+    encoded = tokenizer(prompt, return_tensors="pt")
+    return {k: v.to(device) for k, v in encoded.items()}
+
+
+@torch.no_grad()
+def run_baseline(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompts: Iterable[Tuple[str, Dict]],
+    max_new_tokens: int = 64,
+) -> Tuple[float, List[str]]:
+    """仅使用 Target 模型的基线评测"""
+
+    device = next(model.parameters()).device
+    preds, gts = [], []
+
+    for prompt, raw in prompts:
+        inputs = _prepare_inputs(tokenizer, prompt, device)
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+        text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        ans = extract_answer(text)
+        preds.append(ans)
+        gts.append(raw.get("answer", "").strip().upper())
+
+    accuracy = (
+        sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
+    )
+    return accuracy, preds
+
+
+@torch.no_grad()
+def run_steered(
+    models: Dict[str, AutoModelForCausalLM],
+    tokenizer: AutoTokenizer,
+    prompts: Iterable[Tuple[str, Dict]],
+    max_new_tokens: int = 64,
+) -> Tuple[float, List[str]]:
+    """在生成循环中逐步融合三路 logits 的评测"""
+
+    target = models["target"]
+    base = models["base"]
+    expert = models["expert"]
+    device = next(target.parameters()).device
+
+    preds, gts = [], []
+
+    for prompt, raw in prompts:
+        inputs = _prepare_inputs(tokenizer, prompt, device)
+        cur_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+
+        past_t = past_b = past_e = None
+        generated = []
+
+        for _ in range(max_new_tokens):
+            out_t = target(
+                input_ids=cur_ids,
+                attention_mask=attention_mask,
+                use_cache=True,
+                past_key_values=past_t,
+            )
+            out_b = base(
+                input_ids=cur_ids,
+                attention_mask=attention_mask,
+                use_cache=True,
+                past_key_values=past_b,
+            )
+            out_e = expert(
+                input_ids=cur_ids,
+                attention_mask=attention_mask,
+                use_cache=True,
+                past_key_values=past_e,
+            )
+
+            past_t, past_b, past_e = out_t.past_key_values, out_b.past_key_values, out_e.past_key_values
+
+            logits_t = out_t.logits[:, -1, :]
+            logits_b = out_b.logits[:, -1, :]
+            logits_e = out_e.logits[:, -1, :]
+
+            steered_logits = compute_steered_logits(logits_t, logits_e, logits_b)
+            next_token = steered_logits.argmax(dim=-1)
+            generated.append(next_token)
+
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+
+            cur_ids = next_token.unsqueeze(-1)
+            attention_mask = torch.cat(
+                [attention_mask, torch.ones_like(cur_ids)], dim=-1
+            )
+
+        gen_ids = torch.cat([inputs["input_ids"], torch.stack(generated, dim=1)], dim=1)
+        text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
+        ans = extract_answer(text)
+        preds.append(ans)
+        gts.append(raw.get("answer", "").strip().upper())
+
+    accuracy = (
+        sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
+    )
+    return accuracy, preds
+
+
