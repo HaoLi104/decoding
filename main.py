@@ -38,11 +38,12 @@ def main() -> None:
 
     print("正在加载 MedQA 测试数据 ...")
     dataset = load_medqa(split="test", limit=100)
-    prompts = prepare_batch_prompts(tokenizer, dataset, limit=50)
+    # 暂时只跑 20 个样本以检查是否仍有截断
+    prompts = prepare_batch_prompts(tokenizer, dataset, limit=20)
 
     debug_n = 3  # 打印少量示例，仅显示输出尾部
 
-    gen_len = 640  # 再提高生成上限，降低截断概率
+    gen_len = 1024  # 进一步提高生成上限，降低截断概率
 
     print("开始 Baseline 评测 ...")
     baseline_acc, _ = run_baseline(

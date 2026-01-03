@@ -117,7 +117,7 @@ def run_single(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     prompts: Iterable[Tuple[str, Dict]],
-    max_new_tokens: int = 640,
+    max_new_tokens: int = 1024,
     log_first_n: int = 0,
 ) -> Tuple[float, List[str]]:
     """通用单模型评测，可用于领域专家或底座小模型"""
@@ -156,7 +156,7 @@ def run_baseline(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     prompts: Iterable[Tuple[str, Dict]],
-    max_new_tokens: int = 640,
+    max_new_tokens: int = 1024,
     log_first_n: int = 0,
 ) -> Tuple[float, List[str]]:
     """仅使用 Target 模型的基线评测"""
@@ -195,7 +195,7 @@ def run_steered(
     models: Dict[str, AutoModelForCausalLM],
     tokenizer: AutoTokenizer,
     prompts: Iterable[Tuple[str, Dict]],
-    max_new_tokens: int = 640,
+    max_new_tokens: int = 1024,
     log_first_n: int = 0,
 ) -> Tuple[float, List[str]]:
     """在生成循环中逐步融合三路 logits 的评测"""
