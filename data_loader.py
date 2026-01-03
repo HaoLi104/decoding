@@ -7,7 +7,10 @@ from typing import Dict, List, Tuple
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-SYSTEM_PROMPT = "You are a medical expert. Think step by step."
+SYSTEM_PROMPT = (
+    "You are a medical expert. Always think step by step in English. "
+    "At the end, output your final choice."
+)
 
 
 def load_medqa(split: str = "validation", limit: int = 100):
@@ -43,7 +46,9 @@ def format_prompt(tokenizer: AutoTokenizer, question: str, options) -> str:
         question.strip()
         + "\n"
         + "\n".join(opt_lines)
-        + "\n\n请思考后直接输出最终答案的大写选项字母（A/B/C/D），不要输出解析。"
+        + "\n\nAnswer format: After reasoning, end with a single line "
+        + "in the form 'Final answer: X' where X is one of A/B/C/D. "
+        + "Do not add any text after that line."
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
