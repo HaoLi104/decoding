@@ -12,9 +12,11 @@ RANDOM_SEED: int = 42
 class ModelIDs:
     """模型 ID 常量"""
 
-    TARGET: str = "meta-llama/Llama-3.1-8B-Instruct"
-    DRAFT_BASE: str = "meta-llama/Llama-3.2-1B-Instruct"
-    DRAFT_EXPERT: str = "ContactDoctor/Bio-Medical-Llama-3-2-1B-CoT-012025"
+    # 使用本地 ModelScope 下载后的路径，避免外网访问受限
+    TARGET: str = "/data/ocean/decoding/model/LLM-Research/Meta-Llama-3.1-8B-Instruct"
+    DRAFT_BASE: str = "/data/ocean/decoding/model/LLM-Research/Llama-3.2-1B-Instruct"
+    # 领域专家模型（请先下载到本地路径后再运行）
+    DRAFT_EXPERT: str = "/data/ocean/decoding/model/ContactDoctor/Bio-Medical-Llama-3-2-1B-CoT-012025"
 
 
 @dataclass(frozen=True)
