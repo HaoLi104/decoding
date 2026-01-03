@@ -40,16 +40,18 @@ def main() -> None:
     dataset = load_medqa(split="test", limit=100)
     prompts = prepare_batch_prompts(tokenizer, dataset, limit=50)
 
+    debug_n = 3  # 调试时打印前若干条模型输出，跑正式评测可改为 0
+
     print("开始 Baseline 评测 ...")
-    baseline_acc, _ = run_baseline(models["target"], tokenizer, prompts)
+    baseline_acc, _ = run_baseline(models["target"], tokenizer, prompts, log_first_n=debug_n)
     report_results("Baseline", baseline_acc)
 
     print("开始 Expert-only 评测 ...")
-    expert_acc, _ = run_single(models["expert"], tokenizer, prompts)
+    expert_acc, _ = run_single(models["expert"], tokenizer, prompts, log_first_n=debug_n)
     report_results("Expert-only", expert_acc)
 
     print("开始 Steered 评测 ...")
-    steered_acc, _ = run_steered(models, tokenizer, prompts)
+    steered_acc, _ = run_steered(models, tokenizer, prompts, log_first_n=debug_n)
     report_results("Steered", steered_acc)
 
     print("评测完成，对比总结：")

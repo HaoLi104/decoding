@@ -32,6 +32,21 @@ def extract_answer(text: str) -> str:
     return ""
 
 
+def _normalize_gt(raw_ans) -> str:
+    """将标注答案统一转为 A-D"""
+
+    if raw_ans is None:
+        return ""
+    ans = str(raw_ans).strip().upper()
+    if ans in {"A", "B", "C", "D"}:
+        return ans
+    if ans.isdigit():
+        num = int(ans)
+        if 1 <= num <= 4:
+            return chr(64 + num)  # 1->A
+    return ans
+
+
 def _prepare_inputs(tokenizer: AutoTokenizer, prompt: str, device: torch.device):
     """编码 prompt 并移动到指定设备"""
 
@@ -45,13 +60,14 @@ def run_single(
     tokenizer: AutoTokenizer,
     prompts: Iterable[Tuple[str, Dict]],
     max_new_tokens: int = 64,
+    log_first_n: int = 0,
 ) -> Tuple[float, List[str]]:
     """通用单模型评测，可用于领域专家或底座小模型"""
 
     device = next(model.parameters()).device
     preds, gts = [], []
 
-    for prompt, raw in prompts:
+    for idx, (prompt, raw) in enumerate(prompts):
         inputs = _prepare_inputs(tokenizer, prompt, device)
         output_ids = model.generate(
             **inputs,
@@ -62,7 +78,12 @@ def run_single(
         text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         ans = extract_answer(text)
         preds.append(ans)
-        gts.append(raw.get("answer", "").strip().upper())
+        gt = _normalize_gt(raw.get("answer", ""))
+        gts.append(gt)
+
+        if idx < log_first_n:
+            q_preview = raw.get("question", "")[:80].replace("\n", " ")
+            print(f"[DEBUG single #{idx}] GT={gt} | Pred={ans} | Text={text!r} | Q={q_preview!r}")
 
     accuracy = (
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
@@ -76,13 +97,14 @@ def run_baseline(
     tokenizer: AutoTokenizer,
     prompts: Iterable[Tuple[str, Dict]],
     max_new_tokens: int = 64,
+    log_first_n: int = 0,
 ) -> Tuple[float, List[str]]:
     """仅使用 Target 模型的基线评测"""
 
     device = next(model.parameters()).device
     preds, gts = [], []
 
-    for prompt, raw in prompts:
+    for idx, (prompt, raw) in enumerate(prompts):
         inputs = _prepare_inputs(tokenizer, prompt, device)
         output_ids = model.generate(
             **inputs,
@@ -93,7 +115,12 @@ def run_baseline(
         text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         ans = extract_answer(text)
         preds.append(ans)
-        gts.append(raw.get("answer", "").strip().upper())
+        gt = _normalize_gt(raw.get("answer", ""))
+        gts.append(gt)
+
+        if idx < log_first_n:
+            q_preview = raw.get("question", "")[:80].replace("\n", " ")
+            print(f"[DEBUG baseline #{idx}] GT={gt} | Pred={ans} | Text={text!r} | Q={q_preview!r}")
 
     accuracy = (
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
@@ -107,6 +134,7 @@ def run_steered(
     tokenizer: AutoTokenizer,
     prompts: Iterable[Tuple[str, Dict]],
     max_new_tokens: int = 64,
+    log_first_n: int = 0,
 ) -> Tuple[float, List[str]]:
     """在生成循环中逐步融合三路 logits 的评测"""
 
@@ -117,7 +145,7 @@ def run_steered(
 
     preds, gts = [], []
 
-    for prompt, raw in prompts:
+    for idx, (prompt, raw) in enumerate(prompts):
         inputs = _prepare_inputs(tokenizer, prompt, device)
         cur_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
@@ -167,7 +195,12 @@ def run_steered(
         text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
         ans = extract_answer(text)
         preds.append(ans)
-        gts.append(raw.get("answer", "").strip().upper())
+        gt = _normalize_gt(raw.get("answer", ""))
+        gts.append(gt)
+
+        if idx < log_first_n:
+            q_preview = raw.get("question", "")[:80].replace("\n", " ")
+            print(f"[DEBUG steered #{idx}] GT={gt} | Pred={ans} | Text={text!r} | Q={q_preview!r}")
 
     accuracy = (
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
