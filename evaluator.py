@@ -96,6 +96,15 @@ def _get_gt_with_options(raw_ans, options: Iterable[str]) -> str:
     return ans_upper
 
 
+def _tail(text: str, max_len: int = 400) -> str:
+    """仅展示模型输出尾部，避免打印 prompt"""
+
+    if text is None:
+        return ""
+    text = str(text)
+    return text[-max_len:]
+
+
 def _prepare_inputs(tokenizer: AutoTokenizer, prompt: str, device: torch.device):
     """编码 prompt 并移动到指定设备"""
 
@@ -108,7 +117,7 @@ def run_single(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     prompts: Iterable[Tuple[str, Dict]],
-    max_new_tokens: int = 512,
+    max_new_tokens: int = 640,
     log_first_n: int = 0,
 ) -> Tuple[float, List[str]]:
     """通用单模型评测，可用于领域专家或底座小模型"""
@@ -131,11 +140,9 @@ def run_single(
         gts.append(gt)
 
         if idx < log_first_n:
-            q_preview = raw.get("question", "")[:80].replace("\n", " ")
             print(
                 f"[DEBUG single #{idx}] GT={gt} | Pred={ans} | "
-                f"Options={raw.get('options')} | AnswerRaw={raw.get('answer')} | "
-                f"Text={text!r} | Q={q_preview!r}"
+                f"AnswerRaw={raw.get('answer')} | Tail={_tail(text)}"
             )
 
     accuracy = (
@@ -149,7 +156,7 @@ def run_baseline(
     model: AutoModelForCausalLM,
     tokenizer: AutoTokenizer,
     prompts: Iterable[Tuple[str, Dict]],
-    max_new_tokens: int = 512,
+    max_new_tokens: int = 640,
     log_first_n: int = 0,
 ) -> Tuple[float, List[str]]:
     """仅使用 Target 模型的基线评测"""
@@ -172,11 +179,9 @@ def run_baseline(
         gts.append(gt)
 
         if idx < log_first_n:
-            q_preview = raw.get("question", "")[:80].replace("\n", " ")
             print(
                 f"[DEBUG baseline #{idx}] GT={gt} | Pred={ans} | "
-                f"Options={raw.get('options')} | AnswerRaw={raw.get('answer')} | "
-                f"Text={text!r} | Q={q_preview!r}"
+                f"AnswerRaw={raw.get('answer')} | Tail={_tail(text)}"
             )
 
     accuracy = (
@@ -190,7 +195,7 @@ def run_steered(
     models: Dict[str, AutoModelForCausalLM],
     tokenizer: AutoTokenizer,
     prompts: Iterable[Tuple[str, Dict]],
-    max_new_tokens: int = 512,
+    max_new_tokens: int = 640,
     log_first_n: int = 0,
 ) -> Tuple[float, List[str]]:
     """在生成循环中逐步融合三路 logits 的评测"""
@@ -256,11 +261,9 @@ def run_steered(
         gts.append(gt)
 
         if idx < log_first_n:
-            q_preview = raw.get("question", "")[:80].replace("\n", " ")
             print(
                 f"[DEBUG steered #{idx}] GT={gt} | Pred={ans} | "
-                f"Options={raw.get('options')} | AnswerRaw={raw.get('answer')} | "
-                f"Text={text!r} | Q={q_preview!r}"
+                f"AnswerRaw={raw.get('answer')} | Tail={_tail(text)}"
             )
 
     accuracy = (

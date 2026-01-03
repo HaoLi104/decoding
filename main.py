@@ -40,9 +40,9 @@ def main() -> None:
     dataset = load_medqa(split="test", limit=100)
     prompts = prepare_batch_prompts(tokenizer, dataset, limit=50)
 
-    debug_n = 3  # 调试时打印前若干条模型输出，跑正式评测可改为 0
+    debug_n = 3  # 打印少量示例，仅显示输出尾部
 
-    gen_len = 512  # 允许更长的 CoT，避免截断
+    gen_len = 640  # 再提高生成上限，降低截断概率
 
     print("开始 Baseline 评测 ...")
     baseline_acc, _ = run_baseline(
