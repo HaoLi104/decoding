@@ -25,7 +25,7 @@ class HyperParams:
 
     BASE_ALPHA: float = 1.0  # 初始引导强度
     ADAPTIVE_SCALE: float = 4.0  # 自适应放大因子
-    MAX_BOOST: float = 1.5  # 最大额外放大倍率
+    MAX_BOOST: float = 0.5  # 最大额外放大倍率（适当降低避免偏移过大）
     DISTANCE_METRIC: str = "l2"  # 可选 l2 / jsd，默认 l2
 
 

@@ -105,6 +105,17 @@ def _tail(text: str, max_len: int = 400) -> str:
     return text[-max_len:]
 
 
+def _has_final_answer(text: str) -> bool:
+    """检测文本中是否已出现明确的最终答案模式"""
+
+    if not text:
+        return False
+    for pattern in ANSWER_PATTERNS:
+        if pattern.search(text):
+            return True
+    return False
+
+
 def _prepare_inputs(tokenizer: AutoTokenizer, prompt: str, device: torch.device):
     """编码 prompt 并移动到指定设备"""
 
@@ -252,6 +263,14 @@ def run_steered(
             attention_mask = torch.cat(
                 [attention_mask, torch.ones_like(cur_ids)], dim=-1
             )
+
+            # 早停：若已出现 Final answer 模式，提前结束
+            gen_ids_partial = torch.cat(
+                [inputs["input_ids"], torch.stack(generated, dim=1)], dim=1
+            )
+            decoded_partial = tokenizer.decode(gen_ids_partial[0], skip_special_tokens=True)
+            if _has_final_answer(decoded_partial):
+                break
 
         gen_ids = torch.cat([inputs["input_ids"], torch.stack(generated, dim=1)], dim=1)
         text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
