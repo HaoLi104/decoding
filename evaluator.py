@@ -19,6 +19,7 @@ ANSWER_PATTERNS = [
     re.compile(r"答案\s*[:：]?\s*([A-D])", re.IGNORECASE),
 ]
 NUMBER_PATTERN = re.compile(r"\b([1-4])\b")
+LIST_FINAL_PATTERN = re.compile(r"\*\*([A-D])\.\s", re.IGNORECASE)  # 兼容 Markdown 粗体列表行
 
 
 def extract_answer(text: str) -> str:
@@ -26,6 +27,11 @@ def extract_answer(text: str) -> str:
 
     if not text:
         return ""
+
+    # 0) 兼容 Markdown 粗体列表行 **B. xxx
+    m_list = LIST_FINAL_PATTERN.findall(text)
+    if m_list:
+        return m_list[-1].upper()
 
     # 1) 明确模式优先，如 "The answer is C"、"答案: B" 等
     for pattern in ANSWER_PATTERNS:
