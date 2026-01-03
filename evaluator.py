@@ -11,6 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from steering_utils import compute_steered_logits
 
 ANSWER_PATTERNS = [
+    re.compile(r"final answer\s*[:：]?\s*([A-D])", re.IGNORECASE),
     re.compile(r"the answer is\s*([A-D])", re.IGNORECASE),
     re.compile(r"answer\s*[:：]?\s*([A-D])", re.IGNORECASE),
     re.compile(r"option\s*([A-D])", re.IGNORECASE),
@@ -68,16 +69,28 @@ def _get_gt_with_options(raw_ans, options: Iterable[str]) -> str:
         if 1 <= num <= 4:
             return chr(64 + num)  # 1->A
 
-    # 尝试用选项文本匹配
-    opt_list = list(options) if options is not None else []
-    for idx, opt in enumerate(opt_list):
-        if opt is None:
-            continue
-        opt_str = str(opt).strip()
-        if not opt_str:
-            continue
-        if opt_str.upper() == ans_upper or opt_str.lower() == ans_raw.lower():
-            return chr(65 + idx)  # A/B/C/D
+    # 尝试用选项文本匹配（dict 或 list 均支持）
+    if isinstance(options, dict):
+        sorted_keys = sorted(options.keys())
+        for idx, key in enumerate(sorted_keys):
+            opt_val = options[key]
+            if opt_val is None:
+                continue
+            opt_str = str(opt_val).strip()
+            if not opt_str:
+                continue
+            if opt_str.upper() == ans_upper or opt_str.lower() == ans_raw.lower():
+                return chr(65 + idx)  # A/B/C/D
+    else:
+        opt_list = list(options) if options is not None else []
+        for idx, opt in enumerate(opt_list):
+            if opt is None:
+                continue
+            opt_str = str(opt).strip()
+            if not opt_str:
+                continue
+            if opt_str.upper() == ans_upper or opt_str.lower() == ans_raw.lower():
+                return chr(65 + idx)  # A/B/C/D
 
     # 不匹配时返回原始（用于调试观察）
     return ans_upper
