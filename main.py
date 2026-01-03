@@ -41,7 +41,7 @@ def main() -> None:
     # 暂时只跑 20 个样本以检查是否仍有截断
     prompts = prepare_batch_prompts(tokenizer, dataset, limit=20)
 
-    debug_n = 3  # 打印少量示例，仅显示输出尾部
+    debug_n = 20  # 打印少量示例，仅显示输出尾部
 
     gen_len = 1024  # 进一步提高生成上限，降低截断概率
 
