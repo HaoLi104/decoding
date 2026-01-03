@@ -26,8 +26,11 @@ def load_medqa(split: str = "validation", limit: int = 100):
 def format_prompt(tokenizer: AutoTokenizer, question: str, options: List[str]) -> str:
     """将题目与选项格式化为 Llama-3 chat 模板字符串"""
 
-    user_content = question.strip() + "\n" + "\n".join(
-        [f"{chr(65+i)}. {opt.strip()}" for i, opt in enumerate(options)]
+    user_content = (
+        question.strip()
+        + "\n"
+        + "\n".join([f"{chr(65+i)}. {opt.strip()}" for i, opt in enumerate(options)])
+        + "\n\n请只输出最终答案的选项字母（A/B/C/D），不要输出解析或多余文字。"
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

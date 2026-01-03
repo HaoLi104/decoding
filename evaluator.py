@@ -11,13 +11,25 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from steering_utils import compute_steered_logits
 
 ANSWER_PATTERN = re.compile(r"\b([A-D])\b", re.IGNORECASE)
+NUMBER_PATTERN = re.compile(r"\b([1-4])\b")
 
 
 def extract_answer(text: str) -> str:
-    """从生成文本中提取选项字母"""
+    """从生成文本中提取选项字母，兼容数字 1-4 表示的选项"""
 
     match = ANSWER_PATTERN.search(text)
-    return match.group(1).upper() if match else ""
+    if match:
+        return match.group(1).upper()
+
+    num_match = NUMBER_PATTERN.search(text)
+    if num_match:
+        return chr(64 + int(num_match.group(1)))  # 1->A, 2->B ...
+
+    # 兜底：截取最后出现的 A-D
+    for ch in reversed(text):
+        if ch.upper() in {"A", "B", "C", "D"}:
+            return ch.upper()
+    return ""
 
 
 def _prepare_inputs(tokenizer: AutoTokenizer, prompt: str, device: torch.device):
