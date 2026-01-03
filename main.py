@@ -46,22 +46,31 @@ def main() -> None:
     gen_len = 1024  # 进一步提高生成上限，降低截断概率
 
     print("开始 Baseline 评测 ...")
-    baseline_acc, _ = run_baseline(
+    baseline_acc, baseline_preds, baseline_gts = run_baseline(
         models["target"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
     )
     report_results("Baseline", baseline_acc)
+    print("Baseline 明细（最多前20条）：")
+    for i, (p, g) in enumerate(zip(baseline_preds, baseline_gts)):
+        print(f"- #{i:02d} GT={g} | Pred={p}")
 
     print("开始 Expert-only 评测 ...")
-    expert_acc, _ = run_single(
+    expert_acc, expert_preds, expert_gts = run_single(
         models["expert"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
     )
     report_results("Expert-only", expert_acc)
+    print("Expert-only 明细（最多前20条）：")
+    for i, (p, g) in enumerate(zip(expert_preds, expert_gts)):
+        print(f"- #{i:02d} GT={g} | Pred={p}")
 
     print("开始 Steered 评测 ...")
-    steered_acc, _ = run_steered(
+    steered_acc, steered_preds, steered_gts = run_steered(
         models, tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
     )
     report_results("Steered", steered_acc)
+    print("Steered 明细（最多前20条）：")
+    for i, (p, g) in enumerate(zip(steered_preds, steered_gts)):
+        print(f"- #{i:02d} GT={g} | Pred={p}")
 
     print("评测完成，对比总结：")
     print(f"- Baseline 准确率: {baseline_acc:.4f}")

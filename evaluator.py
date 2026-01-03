@@ -136,8 +136,11 @@ def run_single(
     prompts: Iterable[Tuple[str, Dict]],
     max_new_tokens: int = 1024,
     log_first_n: int = 0,
-) -> Tuple[float, List[str]]:
-    """通用单模型评测，可用于领域专家或底座小模型"""
+) -> Tuple[float, List[str], List[str]]:
+    """通用单模型评测，可用于领域专家或底座小模型
+
+    返回: (accuracy, preds, gts)
+    """
 
     device = next(model.parameters()).device
     preds, gts = [], []
@@ -165,7 +168,7 @@ def run_single(
     accuracy = (
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
     )
-    return accuracy, preds
+    return accuracy, preds, gts
 
 
 @torch.no_grad()
@@ -175,8 +178,11 @@ def run_baseline(
     prompts: Iterable[Tuple[str, Dict]],
     max_new_tokens: int = 1024,
     log_first_n: int = 0,
-) -> Tuple[float, List[str]]:
-    """仅使用 Target 模型的基线评测"""
+) -> Tuple[float, List[str], List[str]]:
+    """仅使用 Target 模型的基线评测
+
+    返回: (accuracy, preds, gts)
+    """
 
     device = next(model.parameters()).device
     preds, gts = [], []
@@ -204,7 +210,7 @@ def run_baseline(
     accuracy = (
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
     )
-    return accuracy, preds
+    return accuracy, preds, gts
 
 
 @torch.no_grad()
@@ -214,7 +220,7 @@ def run_steered(
     prompts: Iterable[Tuple[str, Dict]],
     max_new_tokens: int = 1024,
     log_first_n: int = 0,
-) -> Tuple[float, List[str]]:
+) -> Tuple[float, List[str], List[str]]:
     """在生成循环中逐步融合三路 logits 的评测"""
 
     target = models["target"]
@@ -294,6 +300,6 @@ def run_steered(
     accuracy = (
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
     )
-    return accuracy, preds
+    return accuracy, preds, gts
 
 
