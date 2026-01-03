@@ -8,8 +8,9 @@ from datasets import load_dataset
 from transformers import AutoTokenizer
 
 SYSTEM_PROMPT = (
-    "You are a medical expert. Always think step by step in English. "
-    "At the end, output your final choice."
+    "You are a medical expert. Reason concisely (within 3 sentences) in English. "
+    "Always end with a single line: 'Final answer: X' where X is A/B/C/D. "
+    "Do not add any text after that line."
 )
 
 
@@ -46,9 +47,9 @@ def format_prompt(tokenizer: AutoTokenizer, question: str, options) -> str:
         question.strip()
         + "\n"
         + "\n".join(opt_lines)
-        + "\n\nAnswer format: After reasoning, end with a single line "
+        + "\n\nAnswer format: After reasoning, end with exactly one line "
         + "in the form 'Final answer: X' where X is one of A/B/C/D. "
-        + "Do not add any text after that line."
+        + "No text is allowed after that line."
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

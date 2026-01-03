@@ -42,7 +42,7 @@ def main() -> None:
 
     debug_n = 3  # 调试时打印前若干条模型输出，跑正式评测可改为 0
 
-    gen_len = 256  # 允许更长的 CoT，避免截断
+    gen_len = 512  # 允许更长的 CoT，避免截断
 
     print("开始 Baseline 评测 ...")
     baseline_acc, _ = run_baseline(
