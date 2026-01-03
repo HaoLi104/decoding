@@ -23,14 +23,27 @@ def load_medqa(split: str = "validation", limit: int = 100):
     return dataset
 
 
-def format_prompt(tokenizer: AutoTokenizer, question: str, options: List[str]) -> str:
-    """将题目与选项格式化为 Llama-3 chat 模板字符串"""
+def format_prompt(tokenizer: AutoTokenizer, question: str, options) -> str:
+    """将题目与选项格式化为 Llama-3 chat 模板字符串
+
+    options 可能是 list 或 dict（如 {'A': 'xxx', 'B': 'yyy'}）。
+    """
+
+    # 规范化选项文本
+    opt_lines: List[str] = []
+    if isinstance(options, dict):
+        for key in sorted(options.keys()):
+            val = str(options[key]).strip()
+            opt_lines.append(f"{key}. {val}")
+    else:
+        # 默认按顺序映射到 A/B/C/D...
+        opt_lines = [f"{chr(65+i)}. {str(opt).strip()}" for i, opt in enumerate(list(options))]
 
     user_content = (
         question.strip()
         + "\n"
-        + "\n".join([f"{chr(65+i)}. {opt.strip()}" for i, opt in enumerate(options)])
-        + "\n\n请只输出最终答案的选项字母（A/B/C/D），不要输出解析或多余文字。"
+        + "\n".join(opt_lines)
+        + "\n\n请思考后直接输出最终答案的大写选项字母（A/B/C/D），不要输出解析。"
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
