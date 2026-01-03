@@ -10,22 +10,36 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from steering_utils import compute_steered_logits
 
-ANSWER_PATTERN = re.compile(r"\b([A-D])\b", re.IGNORECASE)
+ANSWER_PATTERNS = [
+    re.compile(r"the answer is\s*([A-D])", re.IGNORECASE),
+    re.compile(r"answer\s*[:：]?\s*([A-D])", re.IGNORECASE),
+    re.compile(r"option\s*([A-D])", re.IGNORECASE),
+    re.compile(r"选项\s*[:：]?\s*([A-D])", re.IGNORECASE),
+    re.compile(r"答案\s*[:：]?\s*([A-D])", re.IGNORECASE),
+]
 NUMBER_PATTERN = re.compile(r"\b([1-4])\b")
 
 
 def extract_answer(text: str) -> str:
-    """从生成文本中提取选项字母，兼容数字 1-4 表示的选项"""
+    """从 CoT 输出中提取最终选项（A-D），优先匹配明确模式，再兜底最后出现的选项字符"""
 
-    match = ANSWER_PATTERN.search(text)
-    if match:
-        return match.group(1).upper()
+    if not text:
+        return ""
 
+    # 1) 明确模式优先，如 "The answer is C"、"答案: B" 等
+    for pattern in ANSWER_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return m.group(1).upper()
+
+    # 2) 兼容数字 1-4 的写法
     num_match = NUMBER_PATTERN.search(text)
     if num_match:
-        return chr(64 + int(num_match.group(1)))  # 1->A, 2->B ...
+        num = int(num_match.group(1))
+        if 1 <= num <= 4:
+            return chr(64 + num)  # 1->A
 
-    # 兜底：截取最后出现的 A-D
+    # 3) 兜底：从末尾向前找最后出现的 A-D
     for ch in reversed(text):
         if ch.upper() in {"A", "B", "C", "D"}:
             return ch.upper()
@@ -33,18 +47,40 @@ def extract_answer(text: str) -> str:
 
 
 def _normalize_gt(raw_ans) -> str:
-    """将标注答案统一转为 A-D"""
+    """留空旧实现，具体在 _get_gt_with_options 中处理"""
+    return str(raw_ans).strip() if raw_ans is not None else ""
+
+
+def _get_gt_with_options(raw_ans, options: Iterable[str]) -> str:
+    """结合选项内容推断正确选项字母"""
 
     if raw_ans is None:
         return ""
-    ans = str(raw_ans).strip().upper()
-    if ans in {"A", "B", "C", "D"}:
-        return ans
-    if ans.isdigit():
-        num = int(ans)
+
+    ans_raw = str(raw_ans).strip()
+    ans_upper = ans_raw.upper()
+
+    # 直接是字母/数字的情况
+    if ans_upper in {"A", "B", "C", "D"}:
+        return ans_upper
+    if ans_raw.isdigit():
+        num = int(ans_raw)
         if 1 <= num <= 4:
             return chr(64 + num)  # 1->A
-    return ans
+
+    # 尝试用选项文本匹配
+    opt_list = list(options) if options is not None else []
+    for idx, opt in enumerate(opt_list):
+        if opt is None:
+            continue
+        opt_str = str(opt).strip()
+        if not opt_str:
+            continue
+        if opt_str.upper() == ans_upper or opt_str.lower() == ans_raw.lower():
+            return chr(65 + idx)  # A/B/C/D
+
+    # 不匹配时返回原始（用于调试观察）
+    return ans_upper
 
 
 def _prepare_inputs(tokenizer: AutoTokenizer, prompt: str, device: torch.device):
@@ -78,12 +114,16 @@ def run_single(
         text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         ans = extract_answer(text)
         preds.append(ans)
-        gt = _normalize_gt(raw.get("answer", ""))
+        gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
         gts.append(gt)
 
         if idx < log_first_n:
             q_preview = raw.get("question", "")[:80].replace("\n", " ")
-            print(f"[DEBUG single #{idx}] GT={gt} | Pred={ans} | Text={text!r} | Q={q_preview!r}")
+            print(
+                f"[DEBUG single #{idx}] GT={gt} | Pred={ans} | "
+                f"Options={raw.get('options')} | AnswerRaw={raw.get('answer')} | "
+                f"Text={text!r} | Q={q_preview!r}"
+            )
 
     accuracy = (
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
@@ -115,12 +155,16 @@ def run_baseline(
         text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         ans = extract_answer(text)
         preds.append(ans)
-        gt = _normalize_gt(raw.get("answer", ""))
+        gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
         gts.append(gt)
 
         if idx < log_first_n:
             q_preview = raw.get("question", "")[:80].replace("\n", " ")
-            print(f"[DEBUG baseline #{idx}] GT={gt} | Pred={ans} | Text={text!r} | Q={q_preview!r}")
+            print(
+                f"[DEBUG baseline #{idx}] GT={gt} | Pred={ans} | "
+                f"Options={raw.get('options')} | AnswerRaw={raw.get('answer')} | "
+                f"Text={text!r} | Q={q_preview!r}"
+            )
 
     accuracy = (
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
@@ -195,12 +239,16 @@ def run_steered(
         text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
         ans = extract_answer(text)
         preds.append(ans)
-        gt = _normalize_gt(raw.get("answer", ""))
+        gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
         gts.append(gt)
 
         if idx < log_first_n:
             q_preview = raw.get("question", "")[:80].replace("\n", " ")
-            print(f"[DEBUG steered #{idx}] GT={gt} | Pred={ans} | Text={text!r} | Q={q_preview!r}")
+            print(
+                f"[DEBUG steered #{idx}] GT={gt} | Pred={ans} | "
+                f"Options={raw.get('options')} | AnswerRaw={raw.get('answer')} | "
+                f"Text={text!r} | Q={q_preview!r}"
+            )
 
     accuracy = (
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
