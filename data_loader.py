@@ -11,8 +11,12 @@ SYSTEM_PROMPT = "You are a medical expert. Think step by step."
 
 
 def load_medqa(split: str = "validation", limit: int = 100):
-    """加载 MedQA (USMLE) 数据集"""
+    """加载 MedQA (USMLE) 数据集
 
+    该数据集只有 train/test 两个 split，无 validation，因此默认使用 test。
+    """
+
+    split = "test" if split not in {"train", "test"} else split
     dataset = load_dataset("GBaker/MedQA-USMLE-4-options", split=split)
     if limit:
         dataset = dataset.select(range(min(limit, len(dataset))))

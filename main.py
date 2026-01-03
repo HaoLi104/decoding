@@ -37,7 +37,7 @@ def main() -> None:
     models, tokenizer = get_model_and_tokenizer()
 
     print("正在加载 MedQA 测试数据 ...")
-    dataset = load_medqa(split="validation", limit=100)
+    dataset = load_medqa(split="test", limit=100)
     prompts = prepare_batch_prompts(tokenizer, dataset, limit=50)
 
     print("开始 Baseline 评测 ...")
