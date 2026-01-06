@@ -15,10 +15,13 @@ class ModelIDs:
     # 使用本地 ModelScope 下载后的路径，避免外网访问受限
     TARGET: str = "/data/ocean/decoding/model/LLM-Research/Meta-Llama-3.1-8B-Instruct"
     DRAFT_BASE: str = "/data/ocean/decoding/model/LLM-Research/Llama-3.2-1B-Instruct"
-    # 领域专家模型（可用 HF 在线或本地快照路径）
-    DRAFT_EXPERT = "/data/ocean/decoding/model/alpha-ai/Medical-Guide-COT-llama3.2-1B"
-    # 领域专家模型（请先下载到本地路径后再运行）
+    # 领域专家模型：优先使用本地快照，避免缓存冲突
+    DRAFT_EXPERT: str = "/data/ocean/decoding/model/alpha-ai/Medical-Guide-COT-llama3.2-1B"
+    # 若未下载，可先 snapshot_download 拉取；或改回在线加载:
+    # DRAFT_EXPERT: str = "alpha-ai/Medical-Guide-COT-llama3.2-1B"
+    #之前的模型路径
     #DRAFT_EXPERT: str = "/data/ocean/decoding/model/ContactDoctor/Bio-Medical-Llama-3-2-1B-CoT-012025"
+    
 
 
 @dataclass(frozen=True)
