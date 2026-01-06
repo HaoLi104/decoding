@@ -63,13 +63,9 @@ def load_models() -> Dict[str, AutoModelForCausalLM]:
     target = AutoModelForCausalLM.from_pretrained(ModelIDs.TARGET, **common_kwargs)
     draft_base = AutoModelForCausalLM.from_pretrained(ModelIDs.DRAFT_BASE, **common_kwargs)
 
-    # 专家模型：若发现配置是本地路径但已损坏/维度不匹配，强制改用在线权重
+    # 专家模型：使用用户配置的路径/ID；仅对特定模型关闭量化
     expert_id = ModelIDs.DRAFT_EXPERT
-    if expert_id.startswith("/"):
-        expert_id = "alpha-ai/Medical-Guide-COT-llama3.2-1B"
-
     expert_kwargs = dict(common_kwargs)
-    # 某些小模型在 4bit 下会报错，对专家模型关闭量化，直接用 FP16 加载。
     if "Medical-Guide-COT-llama3.2-1B" in expert_id:
         expert_kwargs["quantization_config"] = None
         expert_kwargs["torch_dtype"] = torch.float16
