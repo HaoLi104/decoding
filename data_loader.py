@@ -47,9 +47,10 @@ def format_prompt(tokenizer: AutoTokenizer, question: str, options) -> str:
         question.strip()
         + "\n"
         + "\n".join(opt_lines)
-        + "\n\nAnswer format: After reasoning, end with exactly one line "
-        + "in the form 'Final answer: X' where X is one of A/B/C/D. "
-        + "No text is allowed after that line."
+        + "\n\nBefore the final answer, repeat the chosen option text exactly once. "
+        + "Answer format: after reasoning, output the chosen option text, "
+        + "then end with exactly one line in the form 'Final answer: X' "
+        + "where X is one of A/B/C/D. No text is allowed after that line."
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

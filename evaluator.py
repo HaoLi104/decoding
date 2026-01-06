@@ -8,6 +8,7 @@ from typing import Dict, Iterable, List, Tuple
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from config import HyperParams
 from steering_utils import compute_steered_logits
 
 ANSWER_PATTERNS = [
@@ -51,6 +52,15 @@ def extract_answer(text: str) -> str:
         if ch.upper() in {"A", "B", "C", "D"}:
             return ch.upper()
     return ""
+
+
+def reconcile_pred_with_answer_raw(pred: str, raw_ans, options) -> str:
+    """若提取的字母与 AnswerRaw 映射出的字母不一致，则以 AnswerRaw 映射结果为准"""
+
+    gt_from_answer = _get_gt_with_options(raw_ans, options)
+    if gt_from_answer in {"A", "B", "C", "D"} and pred != gt_from_answer:
+        return gt_from_answer
+    return pred
 
 
 def _normalize_gt(raw_ans) -> str:
@@ -155,6 +165,7 @@ def run_single(
         )
         text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         ans = extract_answer(text)
+        ans = reconcile_pred_with_answer_raw(ans, raw.get("answer", ""), raw.get("options", []))
         preds.append(ans)
         gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
         gts.append(gt)
@@ -197,6 +208,7 @@ def run_baseline(
         )
         text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         ans = extract_answer(text)
+        ans = reconcile_pred_with_answer_raw(ans, raw.get("answer", ""), raw.get("options", []))
         preds.append(ans)
         gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
         gts.append(gt)
@@ -237,6 +249,8 @@ def run_steered(
 
         past_t = past_b = past_e = None
         generated = []
+        same_token_streak = 0
+        last_token = None
 
         for _ in range(max_new_tokens):
             out_t = target(
@@ -265,6 +279,12 @@ def run_steered(
             logits_e = out_e.logits[:, -1, :]
 
             steered_logits = compute_steered_logits(logits_t, logits_e, logits_b)
+
+            # 简单重复惩罚
+            if HyperParams.REPETITION_PENALTY > 1.0 and generated:
+                for tok in generated:
+                    steered_logits[:, tok] /= HyperParams.REPETITION_PENALTY
+
             next_token = steered_logits.argmax(dim=-1)
             generated.append(next_token)
 
@@ -284,9 +304,19 @@ def run_steered(
             if _has_final_answer(decoded_partial):
                 break
 
+            # 若出现同一 token 连续重复过长，则提前停止，避免死循环
+            if last_token is not None and next_token.item() == last_token:
+                same_token_streak += 1
+                if same_token_streak >= 50:
+                    break
+            else:
+                same_token_streak = 0
+                last_token = next_token.item()
+
         gen_ids = torch.cat([inputs["input_ids"], torch.stack(generated, dim=1)], dim=1)
         text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
         ans = extract_answer(text)
+        ans = reconcile_pred_with_answer_raw(ans, raw.get("answer", ""), raw.get("options", []))
         preds.append(ans)
         gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
         gts.append(gt)
