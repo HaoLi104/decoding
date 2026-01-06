@@ -62,7 +62,14 @@ def load_models() -> Dict[str, AutoModelForCausalLM]:
 
     target = AutoModelForCausalLM.from_pretrained(ModelIDs.TARGET, **common_kwargs)
     draft_base = AutoModelForCausalLM.from_pretrained(ModelIDs.DRAFT_BASE, **common_kwargs)
-    draft_expert = AutoModelForCausalLM.from_pretrained(ModelIDs.DRAFT_EXPERT, **common_kwargs)
+    expert_kwargs = dict(common_kwargs)
+
+    # 某些小模型（如 alpha-ai/Medical-Guide-COT-llama3.2-1B）在 4bit 下会报错，
+    # 对专家模型关闭量化，直接用 FP16 加载。
+    if "Medical-Guide-COT-llama3.2-1B" in ModelIDs.DRAFT_EXPERT:
+        expert_kwargs["quantization_config"] = None
+        expert_kwargs["torch_dtype"] = torch.float16
+    draft_expert = AutoModelForCausalLM.from_pretrained(ModelIDs.DRAFT_EXPERT, **expert_kwargs)
 
     return {"target": target, "base": draft_base, "expert": draft_expert}
 
