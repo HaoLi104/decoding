@@ -15,12 +15,12 @@ class ModelIDs:
     # 使用本地 ModelScope 下载后的路径，避免外网访问受限
     TARGET: str = "/data/ocean/decoding/model/LLM-Research/Meta-Llama-3.1-8B-Instruct"
     DRAFT_BASE: str = "/data/ocean/decoding/model/LLM-Research/Llama-3.2-1B-Instruct"
-    # 领域专家模型：优先使用本地快照，避免缓存冲突
-    DRAFT_EXPERT: str = "/data/ocean/decoding/model/alpha-ai/Medical-Guide-COT-llama3.2-1B"
-    # 若未下载，可先 snapshot_download 拉取；或改回在线加载:
-    # DRAFT_EXPERT: str = "alpha-ai/Medical-Guide-COT-llama3.2-1B"
-    #之前的模型路径
-    #DRAFT_EXPERT: str = "/data/ocean/decoding/model/ContactDoctor/Bio-Medical-Llama-3-2-1B-CoT-012025"
+    # 领域专家模型：改为在线加载以避免本地快照维度错配
+    DRAFT_EXPERT: str = "alpha-ai/Medical-Guide-COT-llama3.2-1B"
+    # 若需本地快照，可切回本地路径：
+    # DRAFT_EXPERT: str = "/data/ocean/decoding/model/alpha-ai/Medical-Guide-COT-llama3.2-1B"
+    # 之前的模型备选：
+    # DRAFT_EXPERT: str = "/data/ocean/decoding/model/ContactDoctor/Bio-Medical-Llama-3-2-1B-CoT-012025"
     
 
 
