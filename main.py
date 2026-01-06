@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from config import RANDOM_SEED
-from data_loader import load_medqa, prepare_batch_prompts
+from data_loader import load_medqa, load_medmcqa, load_mmlu, prepare_batch_prompts
 from evaluator import run_baseline, run_single, run_steered
 from model_loader import get_model_and_tokenizer
 
@@ -36,41 +36,49 @@ def main() -> None:
     print("正在加载模型与 tokenizer ...")
     models, tokenizer = get_model_and_tokenizer()
 
-    print("正在加载 MedQA 测试数据 ...")
-    dataset = load_medqa(split="test", limit=100)
-    # 暂时只跑 20 个样本以检查是否仍有截断
-    prompts = prepare_batch_prompts(tokenizer, dataset, limit=20)
+    tasks = [
+        ("MedQA (USMLE)", lambda: load_medqa(split="test", limit=200)),
+        ("MMLU - Professional Medicine", lambda: load_mmlu("professional_medicine", split="test", limit=200)),
+        ("MMLU - Medical Genetics", lambda: load_mmlu("medical_genetics", split="test", limit=200)),
+        ("MedMCQA", lambda: load_medmcqa(split="validation", limit=200)),
+    ]
 
-    debug_n = 20  # 打印少量示例，仅显示输出尾部
+    # 每个任务取前 20 个样本做快速对比，可按需调大
+    prompt_limit = 20
+    debug_n = 5  # 每个任务打印少量示例尾部
+    gen_len = 1024  # 生成上限
 
-    gen_len = 1024  # 进一步提高生成上限，降低截断概率
+    for task_name, loader in tasks:
+        print(f"\n==== 开始任务：{task_name} ====")
+        dataset = loader()
+        prompts = prepare_batch_prompts(tokenizer, dataset, limit=prompt_limit)
 
-    print("开始 Baseline 评测 ...")
-    baseline_acc, baseline_preds, baseline_gts = run_baseline(
-        models["target"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
-    )
-    report_results("Baseline", baseline_acc)
-    print("Baseline 明细（最多前20条）：")
-    for i, (p, g) in enumerate(zip(baseline_preds, baseline_gts)):
-        print(f"- #{i:02d} GT={g} | Pred={p}")
+        print("开始 Baseline 评测 ...")
+        baseline_acc, baseline_preds, baseline_gts = run_baseline(
+            models["target"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
+        )
+        report_results(f"{task_name} - Baseline", baseline_acc)
+        print("Baseline 明细：")
+        for i, (p, g) in enumerate(zip(baseline_preds, baseline_gts)):
+            print(f"- #{i:02d} GT={g} | Pred={p}")
 
-    print("开始 Expert-only 评测 ...")
-    expert_acc, expert_preds, expert_gts = run_single(
-        models["expert"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
-    )
-    report_results("Expert-only", expert_acc)
-    print("Expert-only 明细（最多前20条）：")
-    for i, (p, g) in enumerate(zip(expert_preds, expert_gts)):
-        print(f"- #{i:02d} GT={g} | Pred={p}")
+        print("开始 Expert-only 评测 ...")
+        expert_acc, expert_preds, expert_gts = run_single(
+            models["expert"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
+        )
+        report_results(f"{task_name} - Expert-only", expert_acc)
+        print("Expert-only 明细：")
+        for i, (p, g) in enumerate(zip(expert_preds, expert_gts)):
+            print(f"- #{i:02d} GT={g} | Pred={p}")
 
-    print("开始 Steered 评测 ...")
-    steered_acc, steered_preds, steered_gts = run_steered(
-        models, tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
-    )
-    report_results("Steered", steered_acc)
-    print("Steered 明细（最多前20条）：")
-    for i, (p, g) in enumerate(zip(steered_preds, steered_gts)):
-        print(f"- #{i:02d} GT={g} | Pred={p}")
+        print("开始 Steered 评测 ...")
+        steered_acc, steered_preds, steered_gts = run_steered(
+            models, tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
+        )
+        report_results(f"{task_name} - Steered", steered_acc)
+        print("Steered 明细：")
+        for i, (p, g) in enumerate(zip(steered_preds, steered_gts)):
+            print(f"- #{i:02d} GT={g} | Pred={p}")
 
     print("评测完成，对比总结：")
     print(f"- Baseline 准确率: {baseline_acc:.4f}")
