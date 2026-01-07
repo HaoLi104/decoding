@@ -109,6 +109,7 @@ def prepare_batch_prompts(
             if not opts and all(k in item for k in ["opa", "opb", "opc", "opd"]):
                 opts = [item["opa"], item["opb"], item["opc"], item["opd"]]
                 item["options"] = opts
+            options = item.get("options", opts)  # 更新局部变量
             # cop 可能是数字或字母
             idx = None
             if isinstance(ans_raw, str):

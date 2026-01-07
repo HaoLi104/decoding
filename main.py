@@ -67,6 +67,9 @@ def main() -> None:
             print(f"[WARN] 加载任务 {task_name} 失败，跳过。错误：{e}")
             continue
         prompts = prepare_batch_prompts(tokenizer, dataset, limit=prompt_limit)
+        if not prompts:
+            print(f"[WARN] 任务 {task_name} 无可用样本（可能缺少答案/选项），已跳过。")
+            continue
 
         print("开始 Baseline 评测 ...")
         baseline_acc, baseline_preds, baseline_gts = run_baseline(
