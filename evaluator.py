@@ -55,10 +55,10 @@ def extract_answer(text: str) -> str:
 
 
 def reconcile_pred_with_answer_raw(pred: str, raw_ans, options) -> str:
-    """若提取的字母与 AnswerRaw 映射出的字母不一致，则以 AnswerRaw 映射结果为准"""
+    """若模型未给出有效字母且可从 AnswerRaw 映射得到字母，则回填；否则保持模型预测"""
 
     gt_from_answer = _get_gt_with_options(raw_ans, options)
-    if gt_from_answer in {"A", "B", "C", "D"} and pred != gt_from_answer:
+    if pred not in {"A", "B", "C", "D"} and gt_from_answer in {"A", "B", "C", "D"}:
         return gt_from_answer
     return pred
 
