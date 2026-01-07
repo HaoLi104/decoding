@@ -37,7 +37,6 @@ def main() -> None:
     models, tokenizer = get_model_and_tokenizer()
 
     tasks = [
-        ("MedQA (USMLE)", lambda: load_medqa(split="test", limit=200)),
         ("MMLU - Professional Medicine", lambda: load_mmlu("professional_medicine", split="test", limit=200)),
         ("MMLU - Medical Genetics", lambda: load_mmlu("medical_genetics", split="test", limit=200)),
         ("MedMCQA", lambda: load_medmcqa(split="validation", limit=200)),
