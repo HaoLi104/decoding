@@ -109,12 +109,22 @@ def prepare_batch_prompts(
             if not opts and all(k in item for k in ["opa", "opb", "opc", "opd"]):
                 opts = [item["opa"], item["opb"], item["opc"], item["opd"]]
                 item["options"] = opts
-            try:
-                ans_idx = int(ans_raw) - 1
-                if 0 <= ans_idx < len(opts):
-                    item["answer"] = opts[ans_idx]
-            except Exception:
-                pass
+            # cop 可能是数字或字母
+            idx = None
+            if isinstance(ans_raw, str):
+                ans_raw = ans_raw.strip()
+                if ans_raw.isdigit():
+                    idx = int(ans_raw) - 1
+                elif ans_raw.lower() in {"a", "b", "c", "d"}:
+                    idx = ord(ans_raw.lower()) - ord("a")
+            elif isinstance(ans_raw, int):
+                idx = ans_raw - 1
+            if idx is not None and 0 <= idx < len(opts):
+                item["answer"] = opts[idx]
+
+        # 如果缺少答案或选项，跳过该样本，避免 GT 为空
+        if not options or not item.get("answer"):
+            continue
 
         prompt = format_prompt(tokenizer, question, options)
         prompts.append((prompt, item))
