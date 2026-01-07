@@ -100,10 +100,15 @@ def prepare_batch_prompts(
                 item["answer"] = options[ans_idx]
 
         # MedMCQA: answer/correct option 可能是数字字符串
-        if "cop" in item and "options" in item and "answer" not in item:
+        # 原始字段为 opa/opb/opc/opd + cop
+        if ("cop" in item) and ("answer" not in item):
             item = dict(item)
             ans_raw = item.get("cop")
             opts = item.get("options", [])
+            # 若没有 options 字段，尝试由 opa/opb/opc/opd 生成
+            if not opts and all(k in item for k in ["opa", "opb", "opc", "opd"]):
+                opts = [item["opa"], item["opb"], item["opc"], item["opd"]]
+                item["options"] = opts
             try:
                 ans_idx = int(ans_raw) - 1
                 if 0 <= ans_idx < len(opts):

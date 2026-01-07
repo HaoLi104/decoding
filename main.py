@@ -2,8 +2,9 @@
 项目入口：加载模型与数据，运行 Baseline 与 Steered 评测
 """
 
+import os
 import random
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 import torch
@@ -36,18 +37,29 @@ def main() -> None:
     print("正在加载模型与 tokenizer ...")
     models, tokenizer = get_model_and_tokenizer()
 
-    tasks = [
-        ("MMLU - Professional Medicine", lambda: load_mmlu("professional_medicine", split="test", limit=200)),
-        ("MMLU - Medical Genetics", lambda: load_mmlu("medical_genetics", split="test", limit=200)),
-        ("MedMCQA", lambda: load_medmcqa(split="validation", limit=200)),
+    # 可通过环境变量 TASKS 控制任务列表，逗号分隔，支持：
+    # pro_med, med_gen, medmcqa
+    task_env = os.environ.get("TASKS", "").split(",")
+    task_env = [t.strip() for t in task_env if t.strip()]
+
+    default_tasks = [
+        ("pro_med", "MMLU - Professional Medicine", lambda: load_mmlu("professional_medicine", split="test", limit=200)),
+        ("med_gen", "MMLU - Medical Genetics", lambda: load_mmlu("medical_genetics", split="test", limit=200)),
+        ("medmcqa", "MedMCQA", lambda: load_medmcqa(split="validation", limit=200)),
     ]
+
+    if task_env:
+        task_keys = set(task_env)
+        tasks = [(k, name, fn) for k, name, fn in default_tasks if k in task_keys]
+    else:
+        tasks = default_tasks
 
     # 每个任务取前 20 个样本做快速对比，可按需调大
     prompt_limit = 20
     debug_n = 5  # 每个任务打印少量示例尾部
     gen_len = 1024  # 生成上限
 
-    for task_name, loader in tasks:
+    for task_key, task_name, loader in tasks:
         print(f"\n==== 开始任务：{task_name} ====")
         try:
             dataset = loader()
