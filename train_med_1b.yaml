@@ -21,11 +21,10 @@ max_grad_norm: 1.0
 ### --- 4. 显卡并行加速 (4×H200) --- ###
 per_device_train_batch_size: 8          # H200 足够，如显存富余可升到 12~16
 per_device_eval_batch_size: 8
-gradient_accumulation_steps: 4          # 全局 batch = 4卡 * 8 * 4 = 128
+gradient_accumulation_steps: 4          # 全局 batch = 4卡 * 16 * 4 = 256（若升到16时）
 bf16: true
-gradient_checkpointing: true
-# flash_attn 若已成功安装可设为 fa2；未装或失败请注释或设为 null
-flash_attn: null
+gradient_checkpointing: false           # H200 显存充裕，关闭以加速
+flash_attn: fa2                         # Hopper 架构建议启用 FA2，需已安装 flash-attn
 
 ### --- 5. DeepSpeed 配置 --- ###
 deepspeed: examples/deepspeed/ds_z2_config.json  # 默认 ZeRO-2，适合全参
