@@ -59,6 +59,9 @@ def main() -> None:
     debug_n = 5  # 每个任务打印少量示例尾部
     gen_len = 2048  # 生成上限，保证小模型的 CoT 推理能力能完整展现
 
+    # 存储所有任务的准确率用于最终总结
+    all_results = []
+
     for task_key, task_name, loader in tasks:
         print(f"\n==== 开始任务：{task_name} ====")
         try:
@@ -97,11 +100,27 @@ def main() -> None:
         print("Steered 明细：")
         for i, (p, g) in enumerate(zip(steered_preds, steered_gts)):
             print(f"- #{i:02d} GT={g} | Pred={p}")
+        
+        # 保存当前任务的结果
+        all_results.append({
+            "task": task_name,
+            "baseline": baseline_acc,
+            "expert_only": expert_acc,
+            "steered": steered_acc,
+        })
 
-    print("评测完成，对比总结：")
-    print(f"- Baseline 准确率: {baseline_acc:.4f}")
-    print(f"- Expert-only 准确率: {expert_acc:.4f}")
-    print(f"- Steered  准确率: {steered_acc:.4f}")
+    # 最终总结
+    if all_results:
+        print("\n" + "="*50)
+        print("评测完成，所有任务对比总结：")
+        print("="*50)
+        for result in all_results:
+            print(f"\n[{result['task']}]")
+            print(f"  Baseline:    {result['baseline']:.4f}")
+            print(f"  Expert-only: {result['expert_only']:.4f}")
+            print(f"  Steered:     {result['steered']:.4f}")
+    else:
+        print("\n[WARN] 没有成功完成的任务。")
 
 
 if __name__ == "__main__":
