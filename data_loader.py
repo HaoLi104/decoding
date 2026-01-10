@@ -3,6 +3,7 @@
 """
 
 from typing import Dict, List, Tuple
+import re
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
@@ -46,27 +47,99 @@ def load_mmlu(subject: str, split: str = "test", limit: int = 100):
     return dataset
 
 
-def load_medreason(split: str = "validation", limit: int = 100):
-    """加载 MedReason 数据集（医疗推理数据集，与微调数据一致）
-    
-    split: "train" 或 "validation"，默认使用 "validation" 作为评估集
+def _parse_medreason_options(options_raw) -> List[str]:
     """
-    split_map = {"train": "train", "validation": "train", "test": "train"}  # MedReason 只有一个 split，我们用 train 作为验证集
-    actual_split = split_map.get(split, "train")
-    
-    # 从 HuggingFace 加载 MedReason 数据集
-    dataset = load_dataset("UCSC-VLAA/MedReason", split=actual_split)
-    
-    # 如果指定了 limit，随机采样（评估时用固定样本）
-    if limit and limit < len(dataset):
-        # 为了可复现性，固定种子选择前 limit 个样本
-        import random
-        random.seed(42)
-        indices = list(range(len(dataset)))
-        random.shuffle(indices)
-        dataset = dataset.select(indices[:limit])
-    
-    return dataset
+    将 MedReason 的 options 字段解析为按 A/B/C/D 排列的列表。
+    options_raw 常见形态：
+      - 字符串，形如：
+        "Answer Choices:\\nA. ...\\nB. ...\\nC. ...\\nD. ..."
+      - 字典或列表（较少见）
+    返回长度 4（或 <=4）的列表；若解析失败返回空列表。
+    """
+    if options_raw is None:
+        return []
+
+    # list/tuple
+    if isinstance(options_raw, (list, tuple)):
+        return [str(x).strip() for x in list(options_raw)]
+
+    # dict，优先按 A-D 顺序
+    if isinstance(options_raw, dict):
+        vals = []
+        for k in ["A", "B", "C", "D"]:
+            if k in options_raw:
+                vals.append(str(options_raw[k]).strip())
+        if vals:
+            return vals
+        return [str(v).strip() for _, v in sorted(options_raw.items())]
+
+    # str
+    if isinstance(options_raw, str):
+        s = options_raw.strip()
+        if not s:
+            return []
+        s = re.sub(r"^Answer Choices\\s*:\\s*", "", s, flags=re.IGNORECASE)
+        matches = re.findall(
+            r"([A-D])[\\.\\)]\\s*(.*?)(?=(?:\\n[A-D][\\.\\)]|\\s+[A-D][\\.\\)]|$))",
+            s,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        opts = []
+        for _, txt in matches:
+            txt = " ".join(str(txt).strip().split())
+            opts.append(txt)
+        if opts:
+            return opts
+        # 兜底：按行拆
+        lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
+        if lines:
+            return lines
+    return []
+
+
+def _parse_medreason_answer(ans_raw: str, options: List[str]) -> str:
+    """
+    从 answer 文本中确定正确选项（返回选项文本），策略：
+      1) 若答案文本包含某个选项文本（忽略大小写），返回该选项
+      2) 若答案文本含有 A/B/C/D 字母，按字母索引返回对应选项
+    解析失败返回空字符串。
+    """
+    if not ans_raw or not options:
+        return ""
+    ans_low = str(ans_raw).lower()
+    # 1) 包含匹配
+    for opt in options:
+        if opt and opt.lower() in ans_low:
+            return opt
+    # 2) 字母匹配
+    m = re.search(r"\\b([A-D])\\b", ans_raw, flags=re.IGNORECASE)
+    if m:
+        idx = ord(m.group(1).upper()) - 65
+        if 0 <= idx < len(options):
+            return options[idx]
+    return ""
+
+
+def load_medreason_mc(split: str = "train", limit: int = 200):
+    """
+    加载 MedReason 用于多选评测（A/B/C/D 准确率）。
+    - options 解析为列表（A/B/C/D 顺序）
+    - answer 解析为选项文本（不含解释）
+    """
+    ds = load_dataset("UCSC-VLAA/MedReason", split=split)
+    rows = []
+    for item in ds:
+        q = item.get("question", "")
+        opts = _parse_medreason_options(item.get("options"))
+        ans = _parse_medreason_answer(item.get("answer", ""), opts)
+        if not q or not opts or not ans:
+            continue
+        rows.append({"question": q, "options": opts, "answer": ans})
+        if limit and len(rows) >= limit:
+            break
+    from datasets import Dataset
+
+    return Dataset.from_list(rows)
 
 
 def format_prompt(tokenizer: AutoTokenizer, question: str, options) -> str:

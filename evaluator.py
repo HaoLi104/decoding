@@ -23,34 +23,60 @@ NUMBER_PATTERN = re.compile(r"\b([1-4])\b")
 LIST_FINAL_PATTERN = re.compile(r"\*\*([A-D])\.\s", re.IGNORECASE)  # 兼容 Markdown 粗体列表行
 
 
-def extract_answer(text: str) -> str:
-    """从 CoT 输出中提取最终选项（A-D），优先匹配明确模式，再兜底最后出现的选项字符"""
+import re
 
+# 1. 明确的最终答案模式（增加更多变体和中文字符支持）
+ANSWER_PATTERNS = [
+    # 模式 A: "Final answer: A" 或 "结论：A"
+    re.compile(r"(?:final\s+answer|the\s+answer\s+is|conclusion|答案|结论)\s*[:：]?\s*([A-D])", re.IGNORECASE),
+    # 模式 B: 括号包裹 "[A]", "(A)", "【A】", "（A）" (Steering 模式下极易出现)
+    re.compile(r"(?:\[|【|\(|\（)\s*([A-D])\s*(?:\]|】|\)|\）)", re.IGNORECASE),
+    # 模式 C: 强肯定句式 "A is the correct answer"
+    re.compile(r"\b([A-D])\b\s*(?:is\s+the\s+correct\s+answer|是正确答案|是最终选择)", re.IGNORECASE),
+]
+
+# 2. 兼容 Markdown 粗体列表行，如 **B. xxx
+LIST_FINAL_PATTERN = re.compile(r"\*\*([A-D])\.\s", re.IGNORECASE)
+
+# 3. 兼容数字 1-4 的写法
+NUMBER_PATTERN = re.compile(r"\b([1-4])\b")
+
+def extract_answer(text: str) -> str:
+    """增强版：从 CoT 推理输出中精准提取最终选项字母"""
     if not text:
         return ""
 
-    # 0) 兼容 Markdown 粗体列表行 **B. xxx
-    m_list = LIST_FINAL_PATTERN.findall(text)
+    # 为了避免推理过程中的干扰项，我们优先从文本的最后 200 个字符中寻找
+    search_text = text[-200:] if len(text) > 200 else text
+
+    # 1) 优先匹配括号模式 [A] 或 (A)，这通常是 Steering 引导后的强信号
+    for pattern in ANSWER_PATTERNS:
+        m = pattern.search(search_text)
+        if m:
+            return m.group(1).upper()
+
+    # 2) 兼容 Markdown 格式的列表点
+    m_list = LIST_FINAL_PATTERN.findall(search_text)
     if m_list:
         return m_list[-1].upper()
 
-    # 1) 明确模式优先，如 "The answer is C"、"答案: B" 等
+    # 3) 检查整个文本中是否符合 " X"（全局搜索，防止早停位置偏移）
     for pattern in ANSWER_PATTERNS:
         m = pattern.search(text)
         if m:
             return m.group(1).upper()
 
-    # 2) 兼容数字 1-4 的写法
-    num_match = NUMBER_PATTERN.search(text)
+    # 4) 兼容数字 1-4 的写法（仅在尾部查找）
+    num_match = NUMBER_PATTERN.search(search_text)
     if num_match:
         num = int(num_match.group(1))
-        if 1 <= num <= 4:
-            return chr(64 + num)  # 1->A
+        return chr(64 + num)  # 1->A
 
-    # 3) 兜底：从末尾向前找最后出现的 A-D
-    for ch in reversed(text):
-        if ch.upper() in {"A", "B", "C", "D"}:
-            return ch.upper()
+    # 5) 终极兜底：从末尾向前找第一个出现的 A-D 独立字母
+    # 增加单词边界 \b 检查，防止抓到单词里的字母（如 "A" vs "After"）
+    for m in reversed(list(re.finditer(r"\b([A-D])\b", text, re.IGNORECASE))):
+        return m.group(1).upper()
+        
     return ""
 
 

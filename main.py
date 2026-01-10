@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from config import RANDOM_SEED
-from data_loader import load_medqa, load_medmcqa, load_mmlu, prepare_batch_prompts
+from data_loader import load_medqa, load_medmcqa, load_mmlu, load_medreason_mc, prepare_batch_prompts
 from evaluator import run_baseline, run_single, run_steered
 from model_loader import get_model_and_tokenizer
 
@@ -38,11 +38,12 @@ def main() -> None:
     models, tokenizer = get_model_and_tokenizer()
 
     # 可通过环境变量 TASKS 控制任务列表，逗号分隔，支持：
-    # pro_med, med_gen, medmcqa
+    # medreason, pro_med, med_gen, medmcqa
     task_env = os.environ.get("TASKS", "").split(",")
     task_env = [t.strip() for t in task_env if t.strip()]
 
     default_tasks = [
+        ("medreason", "MedReason (MC，多选评测)", lambda: load_medreason_mc(split="train", limit=200)),
         ("pro_med", "MMLU - Professional Medicine", lambda: load_mmlu("professional_medicine", split="test", limit=200)),
         ("med_gen", "MMLU - Medical Genetics", lambda: load_mmlu("medical_genetics", split="test", limit=200)),
         ("medmcqa", "MedMCQA", lambda: load_medmcqa(split="validation", limit=200)),
