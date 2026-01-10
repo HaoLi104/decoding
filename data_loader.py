@@ -119,7 +119,7 @@ def _parse_medreason_answer(ans_raw: str, options: List[str]) -> str:
             return options[idx]
     return ""
 
-
+#load_medreason_mc是用于多选评测（A/B/C/D 准确率）。
 def load_medreason_mc(split: str = "train", limit: int = 200):
     """
     加载 MedReason 用于多选评测（A/B/C/D 准确率）。
