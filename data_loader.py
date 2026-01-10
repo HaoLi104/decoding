@@ -46,6 +46,29 @@ def load_mmlu(subject: str, split: str = "test", limit: int = 100):
     return dataset
 
 
+def load_medreason(split: str = "validation", limit: int = 100):
+    """加载 MedReason 数据集（医疗推理数据集，与微调数据一致）
+    
+    split: "train" 或 "validation"，默认使用 "validation" 作为评估集
+    """
+    split_map = {"train": "train", "validation": "train", "test": "train"}  # MedReason 只有一个 split，我们用 train 作为验证集
+    actual_split = split_map.get(split, "train")
+    
+    # 从 HuggingFace 加载 MedReason 数据集
+    dataset = load_dataset("UCSC-VLAA/MedReason", split=actual_split)
+    
+    # 如果指定了 limit，随机采样（评估时用固定样本）
+    if limit and limit < len(dataset):
+        # 为了可复现性，固定种子选择前 limit 个样本
+        import random
+        random.seed(42)
+        indices = list(range(len(dataset)))
+        random.shuffle(indices)
+        dataset = dataset.select(indices[:limit])
+    
+    return dataset
+
+
 def format_prompt(tokenizer: AutoTokenizer, question: str, options) -> str:
     """将题目与选项格式化为 Llama-3 chat 模板字符串
 
@@ -89,6 +112,25 @@ def prepare_batch_prompts(
         # 规范化字段：确保有 question / options / answer
         question = item.get("question", "")
         options = item.get("options", {})
+        
+        # MedReason 数据集：options 是字符串格式 "Answer Choices: A. ... B. ... C. ... D. ..."
+        if isinstance(options, str) and "Answer Choices:" in options:
+            # 解析选项字符串
+            import re
+            opt_text = options.replace("Answer Choices:", "").strip()
+            # 匹配 "A. xxx" 或 "A) xxx" 等格式
+            opt_matches = re.findall(r'([A-D])[\.\)]\s*([^A-D]+?)(?=[A-D][\.\)]|$)', opt_text, re.IGNORECASE)
+            if opt_matches:
+                options = {match[0].upper(): match[1].strip() for match in opt_matches}
+                item = dict(item)
+                item["options"] = options
+            else:
+                # 如果解析失败，尝试简单的分割
+                parts = [p.strip() for p in opt_text.split(re.compile(r'[A-D][\.\)]', re.IGNORECASE))]
+                if len(parts) >= 4:
+                    options = {chr(65+i): parts[i+1] if i+1 < len(parts) else "" for i in range(4)}
+                    item = dict(item)
+                    item["options"] = options
 
         # MMLU: choices + answer(int)
         if "choices" in item and "answer" in item:
@@ -122,6 +164,23 @@ def prepare_batch_prompts(
                 idx = ans_raw - 1
             if idx is not None and 0 <= idx < len(opts):
                 item["answer"] = opts[idx]
+
+        # MedReason 数据集：answer 可能包含完整解释，需要提取选项字母
+        answer = item.get("answer", "")
+        if isinstance(answer, str) and len(answer) > 10:
+            # 如果 answer 是长文本，尝试提取选项字母（A/B/C/D）
+            import re
+            # 查找 "The answer is X" 或 "Final answer: X" 等模式
+            ans_match = re.search(r'([A-D])[\.\)\s]*$', answer, re.IGNORECASE)
+            if ans_match:
+                item = dict(item)
+                item["answer"] = ans_match.group(1).upper()
+            # 如果没找到，尝试从开头或中间提取
+            elif re.search(r'^([A-D])[\.\)]', answer, re.IGNORECASE):
+                ans_match = re.match(r'^([A-D])[\.\)]', answer, re.IGNORECASE)
+                if ans_match:
+                    item = dict(item)
+                    item["answer"] = ans_match.group(1).upper()
 
         # 如果缺少答案或选项，跳过该样本，避免 GT 为空
         if not options or not item.get("answer"):

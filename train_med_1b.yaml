@@ -1,5 +1,6 @@
 ### --- 1. 模型设置 --- ###
 model_name_or_path: /data/ocean/decoding/model/LLM-Research/Llama-3.2-1B-Instruct
+trust_remote_code: true
 stage: sft
 do_train: true
 finetuning_type: full   # 4×H200 直接全参微调
@@ -24,7 +25,7 @@ max_grad_norm: 1.0
 per_device_train_batch_size: 16          # H200 足够，如显存富余可升到 12~16
 per_device_eval_batch_size: 8
 gradient_accumulation_steps: 4          # 全局 batch = 4卡 * 16 * 4 = 256
-bf16: true
+pure_bf16: true
 gradient_checkpointing: false           # H200 显存充裕，关闭以加速
 flash_attn: fa2                         # Hopper 架构已确认安装 flash-attn，可启用 FA2
 
