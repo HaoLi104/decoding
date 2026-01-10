@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from config import RANDOM_SEED
-from data_loader import load_medqa, load_medmcqa, load_mmlu, load_medreason, prepare_batch_prompts
+from data_loader import load_medqa, load_medmcqa, load_mmlu, prepare_batch_prompts
 from evaluator import run_baseline, run_single, run_steered
 from model_loader import get_model_and_tokenizer
 
@@ -38,12 +38,11 @@ def main() -> None:
     models, tokenizer = get_model_and_tokenizer()
 
     # 可通过环境变量 TASKS 控制任务列表，逗号分隔，支持：
-    # medreason, pro_med, med_gen, medmcqa
+    # pro_med, med_gen, medmcqa
     task_env = os.environ.get("TASKS", "").split(",")
     task_env = [t.strip() for t in task_env if t.strip()]
 
     default_tasks = [
-        ("medreason", "MedReason (医疗推理，与微调数据一致)", lambda: load_medreason(split="validation", limit=200)),
         ("pro_med", "MMLU - Professional Medicine", lambda: load_mmlu("professional_medicine", split="test", limit=200)),
         ("med_gen", "MMLU - Medical Genetics", lambda: load_mmlu("medical_genetics", split="test", limit=200)),
         ("medmcqa", "MedMCQA", lambda: load_medmcqa(split="validation", limit=200)),
@@ -58,7 +57,7 @@ def main() -> None:
     # 每个任务取前 20 个样本做快速对比，可按需调大
     prompt_limit = 20
     debug_n = 5  # 每个任务打印少量示例尾部
-    gen_len = 1024  # 生成上限
+    gen_len = 2048  # 生成上限，保证小模型的 CoT 推理能力能完整展现
 
     for task_key, task_name, loader in tasks:
         print(f"\n==== 开始任务：{task_name} ====")
