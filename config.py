@@ -15,8 +15,10 @@ class ModelIDs:
     # 使用本地 ModelScope 下载后的路径，避免外网访问受限
     TARGET: str = "/data/ocean/decoding/model/neuralmagic/Meta-Llama-3.1-70B-Instruct-FP8"
     DRAFT_BASE: str = "/data/ocean/decoding/model/LLM-Research/Meta-Llama-3.1-8B-Instruct"
-    # 领域专家模型 - 本地医疗 8B
-    DRAFT_EXPERT: str = "/data/ocean/decoding/model/FreedomIntelligence/HuatuoGPT-o1-8B"
+    # 领域专家模型 - MedReason-8B
+    DRAFT_EXPERT: str = "/data/ocean/decoding/model/UCSC-VLAA/MedReason-8B"
+    # 之前的专家模型路径（已注释）
+    # DRAFT_EXPERT: str = "/data/ocean/decoding/model/dir"  # HuatuoGPT-o1-8B
     
 
 
