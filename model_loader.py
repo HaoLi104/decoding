@@ -2,6 +2,7 @@
 模型加载模块：负责同时加载三套模型与共享 Tokenizer
 """
 
+import os
 from typing import Dict, Tuple
 
 import torch
@@ -69,24 +70,34 @@ def load_models() -> Dict[str, AutoModelForCausalLM]:
         # FP8 模型让 transformers 自动处理，不强制指定 dtype
         if Hardware.TORCH_DTYPE == "auto":
             target_kwargs["torch_dtype"] = None
-        # 限制 70B 模型显存使用：只使用 GPU 0 和 GPU 2（避免占用正在使用的 GPU）
-        # 每张 GPU 最多 100GB，留出空间给其他模型
-        max_memory = {0: "100GiB", 2: "100GiB"}
+        # 限制 70B 模型显存使用：支持环境变量 TARGET_GPUS (默认 0,2)
+        # 每张 GPU 最多 100GiB (意为尽可能多用)
+        target_gpus_env = os.environ.get("TARGET_GPUS", "0,2")
+        target_gpus = [int(x) for x in target_gpus_env.split(",") if x.strip().isdigit()]
+        
+        max_memory = {g: "100GiB" for g in target_gpus}
         max_memory["cpu"] = "200GiB"  # CPU offloading 备用
         target_kwargs["max_memory"] = max_memory
-        # 让 transformers 自动分配到 GPU 0 和 2（通过 max_memory 限制）
+        # 让 transformers 自动分配到这些 GPU
         target_kwargs["device_map"] = "auto"
     target = AutoModelForCausalLM.from_pretrained(ModelIDs.TARGET, **target_kwargs)
     
-    # 8B 模型分配到 GPU 6（避免占用其他 GPU）
+    # 获取 Draft 模型 (Base/Expert) 的 GPU 配置，默认 GPU 6，可改为 "0,2" 等
+    draft_gpus_env = os.environ.get("DRAFT_GPUS", "6")
+    draft_gpus = [int(x) for x in draft_gpus_env.split(",") if x.strip().isdigit()]
+    # Draft 模型显存限制 (默认 20GiB)
+    draft_mem_limit = os.environ.get("DRAFT_MAX_MEM", "20GiB")
+    draft_max_memory = {g: draft_mem_limit for g in draft_gpus}
+
+    # 8B Base 模型
     base_kwargs = dict(common_kwargs)
-    base_kwargs["max_memory"] = {6: "20GiB"}  # 8B 模型 4bit 量化后约 4-5GB，留出余量
+    base_kwargs["max_memory"] = draft_max_memory
     draft_base = AutoModelForCausalLM.from_pretrained(ModelIDs.DRAFT_BASE, **base_kwargs)
 
     # 专家模型：使用用户配置的路径/ID；仅对特定模型关闭量化
     expert_id = ModelIDs.DRAFT_EXPERT
     expert_kwargs = dict(common_kwargs)
-    expert_kwargs["max_memory"] = {6: "20GiB"}  # 8B 模型 4bit 量化后约 4-5GB，留出余量
+    expert_kwargs["max_memory"] = draft_max_memory
     if "Medical-Guide-COT-llama3.2-1B" in expert_id:
         expert_kwargs["quantization_config"] = None
         expert_kwargs["torch_dtype"] = torch.float16
