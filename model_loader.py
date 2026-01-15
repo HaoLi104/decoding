@@ -60,7 +60,14 @@ def load_models() -> Dict[str, AutoModelForCausalLM]:
         "quantization_config": quant_config,
     }
 
-    target = AutoModelForCausalLM.from_pretrained(ModelIDs.TARGET, **common_kwargs)
+    # TARGET 模型（70B FP8）：已经是 FP8 格式，关闭量化配置
+    target_kwargs = dict(common_kwargs)
+    if "FP8" in ModelIDs.TARGET or "70B" in ModelIDs.TARGET:
+        target_kwargs["quantization_config"] = None
+        # FP8 模型让 transformers 自动处理，不强制指定 dtype
+        if Hardware.TORCH_DTYPE == "auto":
+            target_kwargs["torch_dtype"] = None
+    target = AutoModelForCausalLM.from_pretrained(ModelIDs.TARGET, **target_kwargs)
     draft_base = AutoModelForCausalLM.from_pretrained(ModelIDs.DRAFT_BASE, **common_kwargs)
 
     # 专家模型：使用用户配置的路径/ID；仅对特定模型关闭量化
