@@ -130,11 +130,7 @@ def main() -> None:
                 output_file=out_file
             )
             report_results(f"{task_name} - Steered", steered_acc)
-            print(f"  --> 结果已保存至: {out_file}"
-            steered_acc, steered_preds, steered_gts = run_steered(
-                models, tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
-            )
-            report_results(f"{task_name} - Steered", steered_acc)
+            print(f"  --> 结果已保存至: {out_file}")
             print("Steered 明细：")
             for i, (p, g) in enumerate(zip(steered_preds, steered_gts)):
                 print(f"- #{i:02d} GT={g} | Pred={p}")
