@@ -128,19 +128,57 @@ def load_medreason_mc(split: str = "train", limit: int = 200):
     - 优先使用本地路径，如果不存在则从 Hub 下载
     """
     import os
+    import json
     
-    # 优先尝试本地路径
-    local_path = "/data/ocean/decoding/MedReason"
-    if os.path.exists(local_path):
+    # 优先尝试本地路径（检查多个可能的数据文件位置）
+    local_base = "/data/ocean/decoding/MedReason"
+    ds = None
+    
+    # 尝试1: 检查是否是 Hugging Face datasets 格式
+    if os.path.exists(local_base):
         try:
-            # 尝试作为本地数据集目录加载
-            ds = load_dataset(local_path, split=split)
+            ds = load_dataset(local_base, split=split)
         except Exception:
-            # 如果失败，回退到 Hub
+            pass
+    
+    # 尝试2: 检查 eval_data 或 processed 目录中的 JSON/JSONL 文件
+    if ds is None:
+        for subdir in ["eval_data", "processed", "raw"]:
+            subdir_path = os.path.join(local_base, subdir)
+            if os.path.exists(subdir_path):
+                # 查找 JSON/JSONL 文件
+                for fname in os.listdir(subdir_path):
+                    if fname.endswith((".json", ".jsonl")):
+                        file_path = os.path.join(subdir_path, fname)
+                        try:
+                            # 尝试作为 JSONL 加载
+                            if fname.endswith(".jsonl"):
+                                rows = []
+                                with open(file_path, "r", encoding="utf-8") as f:
+                                    for line in f:
+                                        if line.strip():
+                                            rows.append(json.loads(line))
+                                if rows:
+                                    from datasets import Dataset
+                                    ds = Dataset.from_list(rows)
+                                    break
+                            # 或作为 JSON 数组加载
+                            elif fname.endswith(".json"):
+                                with open(file_path, "r", encoding="utf-8") as f:
+                                    data = json.load(f)
+                                    if isinstance(data, list):
+                                        from datasets import Dataset
+                                        ds = Dataset.from_list(data)
+                                        break
+                        except Exception:
+                            continue
+    
+    # 如果本地加载失败，回退到 Hub
+    if ds is None:
+        try:
             ds = load_dataset("UCSC-VLAA/MedReason", split=split)
-    else:
-        # 本地路径不存在，从 Hub 加载
-        ds = load_dataset("UCSC-VLAA/MedReason", split=split)
+        except Exception as e:
+            raise RuntimeError(f"无法加载 MedReason 数据集（本地和 Hub 都失败）: {e}")
     
     rows = []
     for item in ds:
