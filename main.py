@@ -76,6 +76,10 @@ def main() -> None:
 
     # 存储所有任务的准确率用于最终总结
     all_results = []
+    
+    # 结果保存目录
+    results_dir = "logs"
+    os.makedirs(results_dir, exist_ok=True)
 
     for task_key, task_name, loader in tasks:
         print(f"\n==== 开始任务：{task_name} ====")
@@ -88,14 +92,13 @@ def main() -> None:
         if not prompts:
             print(f"[WARN] 任务 {task_name} 无可用样本（可能缺少答案/选项），已跳过。")
             continue
-
-        baseline_acc = 0.0
-        if "baseline" in active_modes:
-            print("开始 Baseline 评测 ...")
+out_file = os.path.join(results_dir, f"{task_key}_baseline.jsonl")
             baseline_acc, baseline_preds, baseline_gts = run_baseline(
-                models["target"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
+                models["target"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n,
+                output_file=out_file
             )
             report_results(f"{task_name} - Baseline", baseline_acc)
+            print(f"  --> 结果已保存至: {out_file}")
             print("Baseline 明细：")
             for i, (p, g) in enumerate(zip(baseline_preds, baseline_gts)):
                 print(f"- #{i:02d} GT={g} | Pred={p}")
@@ -103,10 +106,13 @@ def main() -> None:
         expert_acc = 0.0
         if "expert" in active_modes or "expert-only" in active_modes:
             print("开始 Expert-only 评测 ...")
+            out_file = os.path.join(results_dir, f"{task_key}_expert.jsonl")
             expert_acc, expert_preds, expert_gts = run_single(
-                models["expert"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
+                models["expert"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n,
+                output_file=out_file
             )
             report_results(f"{task_name} - Expert-only", expert_acc)
+            print(f"  --> 结果已保存至: {out_file}")
             print("Expert-only 明细：")
             for i, (p, g) in enumerate(zip(expert_preds, expert_gts)):
                 print(f"- #{i:02d} GT={g} | Pred={p}")
@@ -114,6 +120,13 @@ def main() -> None:
         steered_acc = 0.0
         if "steered" in active_modes:
             print("开始 Steered 评测 ...")
+            out_file = os.path.join(results_dir, f"{task_key}_steered.jsonl")
+            steered_acc, steered_preds, steered_gts = run_steered(
+                models, tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n,
+                output_file=out_file
+            )
+            report_results(f"{task_name} - Steered", steered_acc)
+            print(f"  --> 结果已保存至: {out_file}"
             steered_acc, steered_preds, steered_gts = run_steered(
                 models, tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
             )

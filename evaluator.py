@@ -2,6 +2,8 @@
 评测逻辑：Baseline 与 Steered 模式的 QA 循环
 """
 
+import json
+import os
 import re
 from typing import Dict, Iterable, List, Tuple
 
@@ -72,12 +74,36 @@ def extract_answer(text: str) -> str:
         num = int(num_match.group(1))
         return chr(64 + num)  # 1->A
 
-    # 5) 终极兜底：从末尾向前找第一个出现的 A-D 独立字母
-    # 增加单词边界 \b 检查，防止抓到单词里的字母（如 "A" vs "After"）
-    for m in reversed(list(re.finditer(r"\b([A-D])\b", text, re.IGNORECASE))):
-        return m.group(1).upper()
+    if list(re.finditer(r"\b([A-D])\b", text, re.IGNORECASE)):
+        for m in reversed(list(re.finditer(r"\b([A-D])\b", text, re.IGNORECASE))):
+            return m.group(1).upper()
         
     return ""
+
+
+def _save_result(output_file: str, idx: int, prompt: str, response: str, gt: str, pred: str, raw_item: Dict):
+    """保存单条评测结果到文件"""
+    if not output_file:
+        return
+    
+    # 尝试从 raw_item 获取 id，否则用 idx
+    sample_id = raw_item.get("id", idx)
+    
+    record = {
+        "id": sample_id,
+        "idx": idx,
+        "gt": gt,
+        "pred": pred,
+        "prompt": prompt,
+        "response": response,
+        # "raw": raw_item,  # 可选：保存完整原始数据
+    }
+    
+    # 确保目录存在
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    
+    with open(output_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def reconcile_pred_with_answer_raw(pred: str, raw_ans, options) -> str:
@@ -151,29 +177,40 @@ def _tail(text: str, max_len: int = 400) -> str:
 
 
 def _has_final_answer(text: str) -> bool:
-    """检测文本中是否已出现明确的最终答案模式"""
+    output_file: str = None,
+) -> Tuple[float, List[str], List[str]]:
+    """通用单模型评测，可用于领域专家或底座小模型
 
-    if not text:
-        return False
-    for pattern in ANSWER_PATTERNS:
-        if pattern.search(text):
-            return True
-    return False
+    返回: (accuracy, preds, gts)
+    """
 
+    if output_file and os.path.exists(output_file):
+        os.remove(output_file)
 
-def _prepare_inputs(tokenizer: AutoTokenizer, prompt: str, device: torch.device):
-    """编码 prompt 并移动到指定设备"""
+    device = next(model.parameters()).device
+    preds, gts = [], []
 
-    encoded = tokenizer(prompt, return_tensors="pt")
-    return {k: v.to(device) for k, v in encoded.items()}
+    for idx, (prompt, raw) in enumerate(prompts):
+        inputs = _prepare_inputs(tokenizer, prompt, device)
+        input_len = inputs["input_ids"].shape[1]
 
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=tokenizer.eos_token_id,
+        )
+        text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        # 提取纯回复部分 (去掉 prompt)
+        response_text = tokenizer.decode(output_ids[0][input_len:], skip_special_tokens=True)
 
-@torch.no_grad()
-def run_single(
-    model: AutoModelForCausalLM,
-    tokenizer: AutoTokenizer,
-    prompts: Iterable[Tuple[str, Dict]],
-    max_new_tokens: int = 1024,
+        ans = extract_answer(text)
+        ans = reconcile_pred_with_answer_raw(ans, raw.get("answer", ""), raw.get("options", []))
+        preds.append(ans)
+        gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
+        gts.append(gt)
+
+        _save_result(output_file, idx, prompt, response_text, gt, ans, rawnt = 1024,
     log_first_n: int = 0,
 ) -> Tuple[float, List[str], List[str]]:
     """通用单模型评测，可用于领域专家或底座小模型
@@ -183,9 +220,23 @@ def run_single(
 
     device = next(model.parameters()).device
     preds, gts = [], []
+    output_file: str = None,
+) -> Tuple[float, List[str], List[str]]:
+    """仅使用 Target 模型的基线评测
+
+    返回: (accuracy, preds, gts)
+    """
+
+    if output_file and os.path.exists(output_file):
+        os.remove(output_file)
+
+    device = next(model.parameters()).device
+    preds, gts = [], []
 
     for idx, (prompt, raw) in enumerate(prompts):
         inputs = _prepare_inputs(tokenizer, prompt, device)
+        input_len = inputs["input_ids"].shape[1]
+
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
@@ -193,19 +244,16 @@ def run_single(
             pad_token_id=tokenizer.eos_token_id,
         )
         text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        # 提取纯回复部分
+        response_text = tokenizer.decode(output_ids[0][input_len:], skip_special_tokens=True)
+
         ans = extract_answer(text)
         ans = reconcile_pred_with_answer_raw(ans, raw.get("answer", ""), raw.get("options", []))
         preds.append(ans)
         gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
         gts.append(gt)
 
-        if idx < log_first_n:
-            print(
-                f"[DEBUG single #{idx}] GT={gt} | Pred={ans} | "
-                f"AnswerRaw={raw.get('answer')} | Tail={_tail(text)}"
-            )
-
-    accuracy = (
+        _save_result(output_file, idx, prompt, response_text, gt, ans, raw
         sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
     )
     return accuracy, preds, gts
@@ -239,30 +287,12 @@ def run_baseline(
         ans = extract_answer(text)
         ans = reconcile_pred_with_answer_raw(ans, raw.get("answer", ""), raw.get("options", []))
         preds.append(ans)
-        gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
-        gts.append(gt)
-
-        if idx < log_first_n:
-            print(
-                f"[DEBUG baseline #{idx}] GT={gt} | Pred={ans} | "
-                f"AnswerRaw={raw.get('answer')} | Tail={_tail(text)}"
-            )
-
-    accuracy = (
-        sum(int(p == g) for p, g in zip(preds, gts)) / len(preds) if preds else 0.0
-    )
-    return accuracy, preds, gts
-
-
-@torch.no_grad()
-def run_steered(
-    models: Dict[str, AutoModelForCausalLM],
-    tokenizer: AutoTokenizer,
-    prompts: Iterable[Tuple[str, Dict]],
-    max_new_tokens: int = 1024,
-    log_first_n: int = 0,
+    output_file: str = None,
 ) -> Tuple[float, List[str], List[str]]:
     """在生成循环中逐步融合三路 logits 的评测"""
+
+    if output_file and os.path.exists(output_file):
+        os.remove(output_file)
 
     target = models["target"]
     base = models["base"]
@@ -337,6 +367,33 @@ def run_steered(
 
             # 早停：若已出现 Final answer 模式，提前结束
             gen_ids_partial = torch.cat(
+                [inputs["input_ids"], torch.stack(generated, dim=1)], dim=1
+            )
+            decoded_partial = tokenizer.decode(gen_ids_partial[0], skip_special_tokens=True)
+            if _has_final_answer(decoded_partial):
+                break
+
+            # 若出现同一 token 连续重复过长，则提前停止，避免死循环
+            if last_token is not None and next_token.item() == last_token:
+                same_token_streak += 1
+                if same_token_streak >= 50:
+                    break
+            else:
+                same_token_streak = 0
+                last_token = next_token.item()
+
+        gen_ids = torch.cat([inputs["input_ids"], torch.stack(generated, dim=1)], dim=1)
+        text = tokenizer.decode(gen_ids[0], skip_special_tokens=True)
+        # generated 列表就是纯粹的新 token
+        response_text = tokenizer.decode(torch.stack(generated), skip_special_tokens=True) if generated else ""
+        
+        ans = extract_answer(text)
+        ans = reconcile_pred_with_answer_raw(ans, raw.get("answer", ""), raw.get("options", []))
+        preds.append(ans)
+        gt = _get_gt_with_options(raw.get("answer", ""), raw.get("options", []))
+        gts.append(gt)
+
+        _save_result(output_file, idx, prompt, response_text, gt, ans, rawartial = torch.cat(
                 [inputs["input_ids"], torch.stack(generated, dim=1)], dim=1
             )
             decoded_partial = tokenizer.decode(gen_ids_partial[0], skip_special_tokens=True)
