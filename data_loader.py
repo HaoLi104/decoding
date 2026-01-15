@@ -230,9 +230,15 @@ def format_prompt(tokenizer: AutoTokenizer, question: str, options) -> str:
 def prepare_batch_prompts(
     tokenizer: AutoTokenizer, dataset, limit: int = 50
 ) -> List[Tuple[str, Dict]]:
-    """构建 prompts 列表，返回 (prompt, raw_example)"""
+    """构建 prompts 列表，返回 (prompt, raw_example)
 
-    data = dataset.select(range(min(limit, len(dataset))))
+    允许 limit 为 None 表示全量。
+    """
+
+    if limit is None:
+        data = dataset
+    else:
+        data = dataset.select(range(min(limit, len(dataset))))
     prompts = []
     for item in data:
         # 规范化字段：确保有 question / options / answer
