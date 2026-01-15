@@ -60,10 +60,11 @@ def load_models() -> Dict[str, AutoModelForCausalLM]:
         "quantization_config": quant_config,
     }
 
-    # TARGET 模型（70B FP8）：已经是 FP8 格式，关闭量化配置
+    # TARGET 模型（70B FP8）：已经是 FP8 格式，完全移除量化配置参数
     target_kwargs = dict(common_kwargs)
     if "FP8" in ModelIDs.TARGET or "70B" in ModelIDs.TARGET:
-        target_kwargs["quantization_config"] = None
+        # 完全移除 quantization_config，而不是设为 None
+        target_kwargs.pop("quantization_config", None)
         # FP8 模型让 transformers 自动处理，不强制指定 dtype
         if Hardware.TORCH_DTYPE == "auto":
             target_kwargs["torch_dtype"] = None
