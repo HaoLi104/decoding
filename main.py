@@ -144,18 +144,18 @@ def main() -> None:
         })
 
     # 最终总结
-    if all_rif "baseline" in active_modes:
+    if all_results:
+        print("\n" + "="*50)
+        print("评测完成，所有任务对比总结：")
+        print("="*50)
+        for result in all_results:
+            print(f"\n[{result['task']}]")
+            if "baseline" in active_modes:
                 print(f"  Baseline:    {result['baseline']:.4f}")
             if "expert" in active_modes or "expert-only" in active_modes:
                 print(f"  Expert-only: {result['expert_only']:.4f}")
             if "steered" in active_modes:
-            print("评测完成，所有任务对比总结：")
-        print("="*50)
-        for result in all_results:
-            print(f"\n[{result['task']}]")
-            print(f"  Baseline:    {result['baseline']:.4f}")
-            print(f"  Expert-only: {result['expert_only']:.4f}")
-            print(f"  Steered:     {result['steered']:.4f}")
+                print(f"  Steered:     {result['steered']:.4f}")
     else:
         print("\n[WARN] 没有成功完成的任务。")
 
