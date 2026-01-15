@@ -92,7 +92,11 @@ def main() -> None:
         if not prompts:
             print(f"[WARN] 任务 {task_name} 无可用样本（可能缺少答案/选项），已跳过。")
             continue
-out_file = os.path.join(results_dir, f"{task_key}_baseline.jsonl")
+
+        baseline_acc = 0.0
+        if "baseline" in active_modes:
+            print("开始 Baseline 评测 ...")
+            out_file = os.path.join(results_dir, f"{task_key}_baseline.jsonl")
             baseline_acc, baseline_preds, baseline_gts = run_baseline(
                 models["target"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n,
                 output_file=out_file
