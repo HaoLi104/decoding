@@ -42,11 +42,25 @@ def main() -> None:
     task_env = os.environ.get("TASKS", "").split(",")
     task_env = [t.strip() for t in task_env if t.strip()]
 
+    # 解析样本数量限制 LIMIT (默认20，0或all表示全量)
+    limit_env = os.environ.get("LIMIT", "20").strip().lower()
+    if limit_env in ("0", "none", "all"):
+        data_limit = None
+    else:
+        try:
+            data_limit = int(limit_env)
+        except ValueError:
+            data_limit = 20
+
+    # 解析评测模式 MODES (默认 baseline,expert,steered)
+    modes_env = os.environ.get("MODES", "baseline,expert,steered").lower()
+    active_modes = {m.strip() for m in modes_env.split(",")}
+
     default_tasks = [
-        ("medreason", "MedReason (MC，多选评测)", lambda: load_medreason_mc(split="train", limit=200)),
-        ("pro_med", "MMLU - Professional Medicine", lambda: load_mmlu("professional_medicine", split="test", limit=200)),
-        ("med_gen", "MMLU - Medical Genetics", lambda: load_mmlu("medical_genetics", split="test", limit=200)),
-        ("medmcqa", "MedMCQA", lambda: load_medmcqa(split="validation", limit=200)),
+        ("medreason", "MedReason (MC，多选评测)", lambda: load_medreason_mc(split="train", limit=data_limit)),
+        ("pro_med", "MMLU - Professional Medicine", lambda: load_mmlu("professional_medicine", split="test", limit=data_limit)),
+        ("med_gen", "MMLU - Medical Genetics", lambda: load_mmlu("medical_genetics", split="test", limit=data_limit)),
+        ("medmcqa", "MedMCQA", lambda: load_medmcqa(split="validation", limit=data_limit)),
     ]
 
     if task_env:
@@ -55,8 +69,8 @@ def main() -> None:
     else:
         tasks = default_tasks
 
-    # 每个任务取前 20 个样本做快速对比，可按需调大
-    prompt_limit = 20
+    # 每个任务取前 data_limit 个样本 (None表示全量)
+    prompt_limit = data_limit
     debug_n = 5  # 每个任务打印少量示例尾部
     gen_len = 2048  # 生成上限，保证小模型的 CoT 推理能力能完整展现
 
@@ -75,32 +89,38 @@ def main() -> None:
             print(f"[WARN] 任务 {task_name} 无可用样本（可能缺少答案/选项），已跳过。")
             continue
 
-        print("开始 Baseline 评测 ...")
-        baseline_acc, baseline_preds, baseline_gts = run_baseline(
-            models["target"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
-        )
-        report_results(f"{task_name} - Baseline", baseline_acc)
-        print("Baseline 明细：")
-        for i, (p, g) in enumerate(zip(baseline_preds, baseline_gts)):
-            print(f"- #{i:02d} GT={g} | Pred={p}")
+        baseline_acc = 0.0
+        if "baseline" in active_modes:
+            print("开始 Baseline 评测 ...")
+            baseline_acc, baseline_preds, baseline_gts = run_baseline(
+                models["target"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
+            )
+            report_results(f"{task_name} - Baseline", baseline_acc)
+            print("Baseline 明细：")
+            for i, (p, g) in enumerate(zip(baseline_preds, baseline_gts)):
+                print(f"- #{i:02d} GT={g} | Pred={p}")
 
-        print("开始 Expert-only 评测 ...")
-        expert_acc, expert_preds, expert_gts = run_single(
-            models["expert"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
-        )
-        report_results(f"{task_name} - Expert-only", expert_acc)
-        print("Expert-only 明细：")
-        for i, (p, g) in enumerate(zip(expert_preds, expert_gts)):
-            print(f"- #{i:02d} GT={g} | Pred={p}")
+        expert_acc = 0.0
+        if "expert" in active_modes or "expert-only" in active_modes:
+            print("开始 Expert-only 评测 ...")
+            expert_acc, expert_preds, expert_gts = run_single(
+                models["expert"], tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
+            )
+            report_results(f"{task_name} - Expert-only", expert_acc)
+            print("Expert-only 明细：")
+            for i, (p, g) in enumerate(zip(expert_preds, expert_gts)):
+                print(f"- #{i:02d} GT={g} | Pred={p}")
 
-        print("开始 Steered 评测 ...")
-        steered_acc, steered_preds, steered_gts = run_steered(
-            models, tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
-        )
-        report_results(f"{task_name} - Steered", steered_acc)
-        print("Steered 明细：")
-        for i, (p, g) in enumerate(zip(steered_preds, steered_gts)):
-            print(f"- #{i:02d} GT={g} | Pred={p}")
+        steered_acc = 0.0
+        if "steered" in active_modes:
+            print("开始 Steered 评测 ...")
+            steered_acc, steered_preds, steered_gts = run_steered(
+                models, tokenizer, prompts, max_new_tokens=gen_len, log_first_n=debug_n
+            )
+            report_results(f"{task_name} - Steered", steered_acc)
+            print("Steered 明细：")
+            for i, (p, g) in enumerate(zip(steered_preds, steered_gts)):
+                print(f"- #{i:02d} GT={g} | Pred={p}")
         
         # 保存当前任务的结果
         all_results.append({
@@ -111,9 +131,12 @@ def main() -> None:
         })
 
     # 最终总结
-    if all_results:
-        print("\n" + "="*50)
-        print("评测完成，所有任务对比总结：")
+    if all_rif "baseline" in active_modes:
+                print(f"  Baseline:    {result['baseline']:.4f}")
+            if "expert" in active_modes or "expert-only" in active_modes:
+                print(f"  Expert-only: {result['expert_only']:.4f}")
+            if "steered" in active_modes:
+            print("评测完成，所有任务对比总结：")
         print("="*50)
         for result in all_results:
             print(f"\n[{result['task']}]")
