@@ -61,6 +61,7 @@ def load_models() -> Dict[str, AutoModelForCausalLM]:
     }
 
     # TARGET 模型（70B FP8）：已经是 FP8 格式，完全移除量化配置参数
+    # 使用 max_memory 限制显存使用，为其他模型留出空间
     target_kwargs = dict(common_kwargs)
     if "FP8" in ModelIDs.TARGET or "70B" in ModelIDs.TARGET:
         # 完全移除 quantization_config，而不是设为 None
@@ -68,12 +69,24 @@ def load_models() -> Dict[str, AutoModelForCausalLM]:
         # FP8 模型让 transformers 自动处理，不强制指定 dtype
         if Hardware.TORCH_DTYPE == "auto":
             target_kwargs["torch_dtype"] = None
+        # 限制 70B 模型显存使用：只使用 GPU 0 和 GPU 3（避免占用正在使用的 GPU 1/2）
+        # 每张 GPU 最多 100GB，留出空间给其他模型
+        max_memory = {0: "100GiB", 3: "100GiB"}
+        max_memory["cpu"] = "200GiB"  # CPU offloading 备用
+        target_kwargs["max_memory"] = max_memory
+        # 让 transformers 自动分配到 GPU 0 和 3（通过 max_memory 限制）
+        target_kwargs["device_map"] = "auto"
     target = AutoModelForCausalLM.from_pretrained(ModelIDs.TARGET, **target_kwargs)
-    draft_base = AutoModelForCausalLM.from_pretrained(ModelIDs.DRAFT_BASE, **common_kwargs)
+    
+    # 8B 模型也分配到 GPU 0 和 3（避免占用 GPU 1/2）
+    base_kwargs = dict(common_kwargs)
+    base_kwargs["max_memory"] = {0: "20GiB", 3: "20GiB"}  # 8B 模型 4bit 量化后约 4-5GB，留出余量
+    draft_base = AutoModelForCausalLM.from_pretrained(ModelIDs.DRAFT_BASE, **base_kwargs)
 
     # 专家模型：使用用户配置的路径/ID；仅对特定模型关闭量化
     expert_id = ModelIDs.DRAFT_EXPERT
     expert_kwargs = dict(common_kwargs)
+    expert_kwargs["max_memory"] = {0: "20GiB", 3: "20GiB"}  # 8B 模型 4bit 量化后约 4-5GB，留出余量
     if "Medical-Guide-COT-llama3.2-1B" in expert_id:
         expert_kwargs["quantization_config"] = None
         expert_kwargs["torch_dtype"] = torch.float16
