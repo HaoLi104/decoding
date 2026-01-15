@@ -125,8 +125,23 @@ def load_medreason_mc(split: str = "train", limit: int = 200):
     加载 MedReason 用于多选评测（A/B/C/D 准确率）。
     - options 解析为列表（A/B/C/D 顺序）
     - answer 解析为选项文本（不含解释）
+    - 优先使用本地路径，如果不存在则从 Hub 下载
     """
-    ds = load_dataset("UCSC-VLAA/MedReason", split=split)
+    import os
+    
+    # 优先尝试本地路径
+    local_path = "/data/ocean/decoding/MedReason"
+    if os.path.exists(local_path):
+        try:
+            # 尝试作为本地数据集目录加载
+            ds = load_dataset(local_path, split=split)
+        except Exception:
+            # 如果失败，回退到 Hub
+            ds = load_dataset("UCSC-VLAA/MedReason", split=split)
+    else:
+        # 本地路径不存在，从 Hub 加载
+        ds = load_dataset("UCSC-VLAA/MedReason", split=split)
+    
     rows = []
     for item in ds:
         q = item.get("question", "")

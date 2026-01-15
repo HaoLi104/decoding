@@ -27,6 +27,9 @@ def main() -> None:
     print("下载 MedMCQA ...")
     load_dataset("medmcqa", split="validation", cache_dir=TARGET_CACHE)
 
+    print("下载 MedReason (train split for MC evaluation) ...")
+    load_dataset("UCSC-VLAA/MedReason", split="train", cache_dir=TARGET_CACHE)
+
     print("完成。若需要验证，请查看缓存目录。")
 
 
