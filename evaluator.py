@@ -134,8 +134,11 @@ def _get_gt_with_options(raw_ans, options: Iterable[str]) -> str:
             if opt_str.upper() == ans_upper or opt_str.lower() == ans_raw.lower():
                 return chr(65 + idx)  # A/B/C/D
 
-    # 不匹配时返回原始（用于调试观察）
-    return ans_upper
+    # 不匹配时返回空字符串（而不是无效字母如 F），会被过滤掉
+    # 确保只返回有效的 A/B/C/D
+    if ans_upper in {"A", "B", "C", "D"}:
+        return ans_upper
+    return ""
 
 
 def _tail(text: str, max_len: int = 400) -> str:
@@ -264,12 +267,14 @@ def run_steered(
     target = models["target"]
     base = models["base"]
     expert = models["expert"]
-    device = next(target.parameters()).device
+    device_t = next(target.parameters()).device
+    device_b = next(base.parameters()).device
+    device_e = next(expert.parameters()).device
 
     preds, gts = [], []
 
     for idx, (prompt, raw) in enumerate(prompts):
-        inputs = _prepare_inputs(tokenizer, prompt, device)
+        inputs = _prepare_inputs(tokenizer, prompt, device_t)
         cur_ids = inputs["input_ids"]
         attention_mask = inputs["attention_mask"]
 
@@ -285,24 +290,31 @@ def run_steered(
                 use_cache=True,
                 past_key_values=past_t,
             )
+            # 将输入移动到 base 模型的设备
+            cur_ids_b = cur_ids.to(device_b)
+            attention_mask_b = attention_mask.to(device_b)
             out_b = base(
-                input_ids=cur_ids,
-                attention_mask=attention_mask,
+                input_ids=cur_ids_b,
+                attention_mask=attention_mask_b,
                 use_cache=True,
                 past_key_values=past_b,
             )
+            # 将输入移动到 expert 模型的设备
+            cur_ids_e = cur_ids.to(device_e)
+            attention_mask_e = attention_mask.to(device_e)
             out_e = expert(
-                input_ids=cur_ids,
-                attention_mask=attention_mask,
+                input_ids=cur_ids_e,
+                attention_mask=attention_mask_e,
                 use_cache=True,
                 past_key_values=past_e,
             )
 
             past_t, past_b, past_e = out_t.past_key_values, out_b.past_key_values, out_e.past_key_values
 
+            # 确保 logits 都在同一设备（target 设备）上进行融合
             logits_t = out_t.logits[:, -1, :]
-            logits_b = out_b.logits[:, -1, :]
-            logits_e = out_e.logits[:, -1, :]
+            logits_b = out_b.logits[:, -1, :].to(device_t)
+            logits_e = out_e.logits[:, -1, :].to(device_t)
 
             steered_logits = compute_steered_logits(logits_t, logits_e, logits_b)
 
@@ -317,10 +329,11 @@ def run_steered(
             if next_token.item() == tokenizer.eos_token_id:
                 break
 
-            cur_ids = next_token.unsqueeze(-1)
+            # 确保 cur_ids 和 attention_mask 在 target 设备上（下一轮循环会用到）
+            cur_ids = next_token.unsqueeze(-1).to(device_t)
             attention_mask = torch.cat(
                 [attention_mask, torch.ones_like(cur_ids)], dim=-1
-            )
+            ).to(device_t)
 
             # 早停：若已出现 Final answer 模式，提前结束
             gen_ids_partial = torch.cat(
