@@ -232,10 +232,10 @@ def prepare_batch_prompts(
 ) -> List[Tuple[str, Dict]]:
     """构建 prompts 列表，返回 (prompt, raw_example)
 
-    允许 limit 为 None 表示全量。
+    允许 limit 为 None 或 <=0 表示全量。
     """
 
-    if limit is None:
+    if limit is None or (isinstance(limit, int) and limit <= 0):
         data = dataset
     else:
         data = dataset.select(range(min(limit, len(dataset))))

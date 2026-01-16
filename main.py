@@ -42,13 +42,13 @@ def main() -> None:
     task_env = os.environ.get("TASKS", "").split(",")
     task_env = [t.strip() for t in task_env if t.strip()]
 
-    # 解析样本数量限制 LIMIT (默认20，0或all表示全量)
+    # 解析样本数量限制 LIMIT (默认20，<=0 / none / all 表示全量)
     limit_env = os.environ.get("LIMIT", "20").strip().lower()
-    if limit_env in ("0", "none", "all"):
-        data_limit = None
-    else:
+    data_limit = None
+    if limit_env not in ("", "0", "none", "all"):
         try:
-            data_limit = int(limit_env)
+            parsed_limit = int(limit_env)
+            data_limit = parsed_limit if parsed_limit > 0 else None
         except ValueError:
             data_limit = 20
 
