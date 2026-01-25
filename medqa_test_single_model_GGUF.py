@@ -3,12 +3,12 @@ import json
 import re
 from typing import Optional, List, Tuple
 
+import torch
 from tqdm import tqdm
 try:
     from llama_cpp import Llama
     USE_GGUF = True
 except ImportError:
-    import torch
     from transformers import AutoTokenizer, AutoModelForCausalLM
     USE_GGUF = False
 
