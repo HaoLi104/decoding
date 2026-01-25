@@ -114,7 +114,7 @@ def generate_answers_gguf(model: Llama, prompts: List[str], **kwargs):
         formatted_input = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
         response = model(
             formatted_input,
-            max_tokens=kwargs.get('max_new_tokens', 3072),
+            max_tokens=kwargs.get('max_new_tokens', 4096),
             temperature=kwargs.get('temperature', 0.0),
             top_p=kwargs.get('top_p', 0.9),
             stop=["<|im_end|>", "<|im_start|>", "Question:"],
@@ -130,7 +130,7 @@ def generate_answers_transformers(model, tokenizer, prompts: List[str], **kwargs
     
     gen_ids = model.generate(
         **batch,
-        max_new_tokens=kwargs.get('max_new_tokens', 3072),
+        max_new_tokens=kwargs.get('max_new_tokens', 4096),
         do_sample=(kwargs.get('temperature', 0.0) > 0),
         temperature=kwargs.get('temperature', 0.0) if kwargs.get('temperature', 0.0) > 0 else None,
         top_p=kwargs.get('top_p', 0.9) if kwargs.get('temperature', 0.0) > 0 else None,
@@ -185,7 +185,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="./eval_results.json", type=str)
     parser.add_argument("--max_samples", type=int, default=-1)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--max_new_tokens", type=int, default=3072) # 默认调高
+    parser.add_argument("--max_new_tokens", type=int, default=4096) # 默认调高
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=0.9)
     args = parser.parse_args()
