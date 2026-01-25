@@ -46,7 +46,7 @@ def load_model(model_path: str):
             n_gpu_layers=-1,  # Use GPU
             verbose=False,
         )
-        return None, model  # tokenizer=None for GGUF
+        return None, model, True  # tokenizer=None for GGUF
     else:
         # Transformers format
         print(f"Loading transformers model from {model_path}")
@@ -61,7 +61,7 @@ def load_model(model_path: str):
             device_map="auto",
         )
         model.eval()
-        return tokenizer, model
+        return tokenizer, model, False
 
 
 def load_dataset(dataset_path: str):
