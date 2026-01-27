@@ -111,37 +111,43 @@ def heuristic_first_error_pos(item: Dict[str, Any], phrase: str) -> int:
     # 4. 终极保底：如果确定有错但找不到位置，返回 1
     return 1
 
-def judge_case(item: Dict[str, Any], tokenizer, model, max_new_tokens: int = 2048) -> Tuple[int, str]:
-    """单例评判，增加 Token 长度以容纳 CoT"""
+
+def judge_case(item: Dict[str, Any], tokenizer, model, max_new_tokens: int = 512) -> Tuple[int, str]:
     prompt = format_prompt(item)
     inputs = tokenizer(prompt, return_tensors="pt")
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
+    input_ids = inputs["input_ids"].to(model.device)
+    
+    # 记录输入 Token 的长度
+    input_length = input_ids.shape[1]
     
     with torch.inference_mode():
         output_ids = model.generate(
-            **inputs,
+            input_ids=input_ids, # 明确指定 input_ids
             max_new_tokens=max_new_tokens,
             temperature=0.0,
             do_sample=False,
             pad_token_id=tokenizer.eos_token_id,
         )
     
-    text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    gen_text = text[len(prompt):].strip()
+    # 【关键修改】：只解码模型新生成的 Token 部分
+    gen_tokens = output_ids[0][input_length:]
+    gen_text = tokenizer.decode(gen_tokens, skip_special_tokens=True).strip()
     
+    # 如果 gen_text 还是空的，说明模型真的没说话
+    if not gen_text:
+        return -1, json.dumps({"error": "Model generated empty response", "raw_gen": ""})
+
     # 解析并定位
     parsed_res = extract_first_phrase(gen_text)
     pos = heuristic_first_error_pos(item, parsed_res["phrase"])
     
-    # 返回位置和结构化的评论
     review_info = {
         "thought": parsed_res["thought"],
         "phrase": parsed_res["phrase"],
         "explanation": parsed_res["explanation"],
-        "raw_gen": gen_text # 保留原始生成以便追溯
+        "raw_gen": gen_text 
     }
     return pos, json.dumps(review_info, ensure_ascii=False)
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Annotate first error position with CoT logic.")
     parser.add_argument("--cases", required=True, help="Path to cases JSON")
