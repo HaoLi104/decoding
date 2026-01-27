@@ -9,9 +9,12 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 def load_model(model_path: str):
     """加载模型与分词器"""
+    # 针对 Llama-3.1 系列，建议开启 trust_remote_code
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    
+    # 自动加载模型，device_map="auto" 会自动分配 GPU
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         trust_remote_code=True,
@@ -21,8 +24,8 @@ def load_model(model_path: str):
     model.eval()
     return tokenizer, model
 
-def format_prompt(item: Dict[str, Any]) -> str:
-    """构建优化的 Prompt，要求 CoT 过程嵌套在 JSON 中"""
+def format_prompt_messages(item: Dict[str, Any]) -> List[Dict[str, str]]:
+    """将 Prompt 转换为 Llama-3.1 要求的 Chat List 格式，对齐指令微调规范"""
     q = item.get("question", "")
     opts = item.get("options", {})
     gt = item.get("ground_truth", "")
@@ -30,64 +33,61 @@ def format_prompt(item: Dict[str, Any]) -> str:
     big_pred = item.get("big_model_pred", "")
     opts_text = "\n".join([f"{k}. {v}" for k, v in opts.items()])
     
-    prompt = (
-        "You are a medical expert reviewer. Analyze the student's response to a medical MCQ step-by-step.\n"
-        "1. Compare the student's logic with the correct answer.\n"
-        "2. Identify the EXACT first phrase or sentence where the student's reasoning becomes incorrect.\n"
-        "3. If the student's logic is entirely correct but the final choice is wrong, the error is at the final choice.\n\n"
-        f"Question:\n{q}\n\nOptions:\n{opts_text}\n\nCorrect answer: {gt}\n\n"
-        f"Student final choice (extracted): {big_pred}\n"
-        f"Student response (full):\n{big_resp}\n\n"
-        "Respond ONLY in this JSON format:\n"
-        "{\n"
-        "  \"thought\": \"brief step-by-step analysis\",\n"
-        "  \"first_wrong_phrase\": \"the exact text snippet from the response\",\n"
-        "  \"explanation\": \"why it is wrong\"\n"
-        "}"
+    system_prompt = (
+        "You are a medical expert reviewer. Your task is to identify logical or medical errors "
+        "in a student's response to a Multiple Choice Question. You must output a structured JSON."
     )
-    return prompt
+    
+    user_prompt = (
+        f"Med-MCQ Question:\n{q}\n\n"
+        f"Options:\n{opts_text}\n\n"
+        f"Correct Answer: {gt}\n"
+        f"Student Choice: {big_pred}\n\n"
+        f"Student Reasoning Response:\n{big_resp}\n\n"
+        "Instructions:\n"
+        "1. Analyze the reasoning step-by-step.\n"
+        "2. Identify the EXACT first phrase/sentence that contains an error.\n"
+        "3. If only the final choice is wrong, identify the choice part.\n"
+        "4. Output ONLY this JSON format:\n"
+        "{\"thought\": \"analysis\", \"first_wrong_phrase\": \"text snippet\", \"explanation\": \"reasoning\"}"
+    )
+    
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
+    ]
 
 def extract_first_phrase(text: str) -> Dict[str, str]:
-    """增强型 JSON 提取，支持多种 key 名兼容"""
-    # 尝试匹配最外层的 JSON 括号
-    json_match = re.search(r"\{.*\}", text, flags=re.IGNORECASE | re.DOTALL)
+    """增强型 JSON 提取逻辑"""
     res = {"phrase": "", "explanation": "", "thought": ""}
-    
+    # 查找最外层 JSON
+    json_match = re.search(r"\{.*\}", text, flags=re.IGNORECASE | re.DOTALL)
     if json_match:
         try:
             obj = json.loads(json_match.group(0))
-            # 兼容多种可能的 key 名
-            res["phrase"] = str(obj.get("first_wrong_phrase") or obj.get("phrase") or "")
+            res["phrase"] = str(obj.get("first_wrong_phrase") or obj.get("phrase", ""))
             res["explanation"] = str(obj.get("explanation") or "")
             res["thought"] = str(obj.get("thought") or "")
             return res
-        except Exception:
+        except:
             pass
-            
-    # 如果 JSON 解析完全失败，尝试正则提取短语
+    # 备选正则提取
     m = re.search(r"first_wrong_phrase\"?\s*:\s*\"([^\"]+)\"", text, flags=re.IGNORECASE)
     if m:
         res["phrase"] = m.group(1)
     return res
 
 def heuristic_first_error_pos(item: Dict[str, Any], phrase: str) -> int:
-    """
-    启发式定位：
-    1. 模糊匹配错误短语
-    2. 如果匹配不到，匹配错误的选项字母
-    3. 全都匹配不到则回退到 1 或 0
-    """
+    """计算错误在原文中的字符偏移位置"""
     resp = str(item.get("big_model_response", ""))
     phrase = phrase.strip()
 
-    # 1. 尝试在原文中定位短语 (忽略大小写，允许简单的正则转义)
-    if phrase and phrase.lower() not in ["null", "none", "n/a"]:
-        # 尝试精确匹配
+    if phrase and phrase.lower() not in ["null", "none", "n/a", ""]:
+        # 精确匹配
         idx = resp.find(phrase)
         if idx != -1:
             return idx + 1
-        
-        # 尝试忽略大小写的正则匹配（处理模型可能改变了大小写的情况）
+        # 忽略大小写正则匹配
         try:
             match = re.search(re.escape(phrase), resp, re.IGNORECASE)
             if match:
@@ -95,49 +95,50 @@ def heuristic_first_error_pos(item: Dict[str, Any], phrase: str) -> int:
         except:
             pass
 
-    # 2. 回退：如果预测和真值一致，说明没报错（可能是模型误判）
+    # 回退逻辑：如果选项选错，匹配选项在原文的位置
     gt = str(item.get("ground_truth", "")).strip().upper()
     pred = str(item.get("big_model_pred", "")).strip().upper()
-    if gt and pred and gt == pred:
-        return 0
-
-    # 3. 回退：寻找学生最终选择字母在原文中出现的位置
-    if pred in {"A", "B", "C", "D"} and resp:
-        # 寻找诸如 "the answer is B" 或 "Choice: B" 这种模式
+    if gt and pred and gt != pred:
         m = re.search(rf"\b{pred}\b", resp)
         if m:
             return m.start() + 1
-
-    # 4. 终极保底：如果确定有错但找不到位置，返回 1
-    return 1
-
+            
+    # 若无法定位且已知错误
+    return 1 if gt != pred else 0
 
 def judge_case(item: Dict[str, Any], tokenizer, model, max_new_tokens: int = 512) -> Tuple[int, str]:
-    prompt = format_prompt(item)
-    inputs = tokenizer(prompt, return_tensors="pt")
-    input_ids = inputs["input_ids"].to(model.device)
+    """核心判分函数：使用 Chat Template 并处理 Token 截断"""
+    messages = format_prompt_messages(item)
     
-    # 记录输入 Token 的长度
+    # 使用官方模板构建输入，add_generation_prompt=True 是触发 Assistant 回复的关键
+    input_ids = tokenizer.apply_chat_template(
+        messages, 
+        add_generation_prompt=True, 
+        return_tensors="pt"
+    ).to(model.device)
+    
     input_length = input_ids.shape[1]
     
+    # 针对超长输入的保护措施（Llama-3.1 窗口虽大，但 FP8 建议控制在合理范围）
+    if input_length > 8000:
+        return -1, json.dumps({"error": "Input too long", "token_count": input_length})
+
     with torch.inference_mode():
         output_ids = model.generate(
-            input_ids=input_ids, # 明确指定 input_ids
+            input_ids,
             max_new_tokens=max_new_tokens,
-            temperature=0.0,
-            do_sample=False,
+            temperature=0.01, # 微量随机性有时能改善生成稳定性
+            do_sample=True,
             pad_token_id=tokenizer.eos_token_id,
         )
     
-    # 【关键修改】：只解码模型新生成的 Token 部分
+    # 仅解码生成的部分
     gen_tokens = output_ids[0][input_length:]
     gen_text = tokenizer.decode(gen_tokens, skip_special_tokens=True).strip()
     
-    # 如果 gen_text 还是空的，说明模型真的没说话
     if not gen_text:
         return -1, json.dumps({"error": "Model generated empty response", "raw_gen": ""})
 
-    # 解析并定位
     parsed_res = extract_first_phrase(gen_text)
     pos = heuristic_first_error_pos(item, parsed_res["phrase"])
     
@@ -148,10 +149,11 @@ def judge_case(item: Dict[str, Any], tokenizer, model, max_new_tokens: int = 512
         "raw_gen": gen_text 
     }
     return pos, json.dumps(review_info, ensure_ascii=False)
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Annotate first error position with CoT logic.")
-    parser.add_argument("--cases", required=True, help="Path to cases JSON")
-    parser.add_argument("--model", required=True, help="Reviewer model path")
+    parser = argparse.ArgumentParser(description="Medical Case Error Annotator")
+    parser.add_argument("--cases", required=True, help="Path to input JSON")
+    parser.add_argument("--model", required=True, help="Path to Reviewer LLM")
     parser.add_argument("--output", default="logs/annotated_results.json", help="Output path")
     args = parser.parse_args()
 
@@ -159,7 +161,7 @@ def main() -> None:
     tokenizer, model = load_model(args.model)
 
     annotated = []
-    print(f"Starting processing {len(cases)} cases...")
+    print(f"Processing {len(cases)} cases...")
     
     for idx, item in enumerate(cases):
         try:
@@ -173,12 +175,12 @@ def main() -> None:
         annotated.append(enriched)
         
         if (idx + 1) % 5 == 0:
-            print(f"Processed {idx + 1}/{len(cases)} - Last Pos: {pos}")
+            print(f"[{idx + 1}/{len(cases)}] Current Pos: {pos}")
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(annotated, ensure_ascii=False, indent=2))
-    print(f"Success! Saved to {out_path}")
+    print(f"Completed! Output saved to {out_path}")
 
 if __name__ == "__main__":
     main()
