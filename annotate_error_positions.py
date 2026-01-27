@@ -27,20 +27,31 @@ def format_prompt(item: Dict[str, Any]) -> str:
     opts = item.get("options", {})
     gt = item.get("ground_truth", "")
     big_resp = item.get("big_model_response", "")
+    big_pred = item.get("big_model_pred", "")
     opts_text = "\n".join([f"{k}. {v}" for k, v in opts.items()])
     prompt = (
-        "You are a careful grader. You will be given a medical MCQ, the correct answer, "
-        "and a student's response. Find the first character position (1-based index) in the student's response "
-        "where it starts to become incorrect relative to the correct answer. If the response is fully incorrect "
-        "from the very beginning, return 1. If it is impossible to judge, return -1.\n\n"
+        "You are a careful grader. Given a medical MCQ, the correct answer, and a student's response, "
+        "locate the first character position (1-based index) in the student's response where it becomes incorrect. "
+        "Rules: if it is incorrect from the very first character, output 1; if unsure, output -1. "
+        "Only return strict JSON, no prose.\n\n"
         f"Question:\n{q}\n\nOptions:\n{opts_text}\n\nCorrect answer: {gt}\n\n"
-        f"Student response:\n{big_resp}\n\n"
-        "Respond strictly in JSON with keys 'first_error_pos' (integer) and 'explanation' (short text)."
+        f"Student final choice (extracted): {big_pred}\n"
+        f"Student response (full):\n{big_resp}\n\n"
+        "Respond ONLY this JSON object and nothing else: {\"first_error_pos\": <int>, \"explanation\": <short text>}"
     )
     return prompt
 
 
 def extract_first_int(text: str) -> int:
+    # Try to extract JSON object first
+    json_match = re.search(r"\{[^{}]*first_error_pos[^{}]*\}", text, flags=re.IGNORECASE | re.DOTALL)
+    if json_match:
+        try:
+            obj = json.loads(json_match.group(0))
+            if "first_error_pos" in obj:
+                return int(obj["first_error_pos"])
+        except Exception:
+            pass
     m = re.search(r"first_error_pos\"?\s*[:=]\s*(-?\d+)", text, flags=re.IGNORECASE)
     if m:
         return int(m.group(1))
