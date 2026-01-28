@@ -80,7 +80,7 @@ def apply_qwen_template(prompt: str, tokenizer) -> str:
         messages,
         tokenize=False,
         add_generation_prompt=True,
-        enable_thinking=False,
+        enable_thinking=True,
     )
     return text
 
