@@ -1,0 +1,9 @@
+==================================================
+MEDICAL QA EVALUATION SUMMARY
+==================================================
+Model: /data/ocean/decoding/model/Qwen/Qwen3-14B
+Dataset: MedQA
+Total questions: 1273
+Correct answers: 952
+Accuracy: 0.7478 (74.78%)
+==================================================
