@@ -133,6 +133,9 @@ def process_case(item, small_model, small_tok, big_model, big_tok, args):
         except:
             details = {}
     
+    # Store raw review_details for output
+    review_details_raw = details
+
     if isinstance(details, dict):
         error_phrase = details.get("phrase") or details.get("first_wrong_phrase", "")
     
@@ -196,6 +199,7 @@ def process_case(item, small_model, small_tok, big_model, big_tok, args):
         "id": item.get("id"),
         "ground_truth": ground_truth,
         "error_phrase_identified": error_phrase,
+        "review_details": review_details_raw,
         "prefix_context": prefix_text,
         "small_model": {
             "next_token_top5": grad_small,
@@ -237,10 +241,26 @@ def main():
         if res:
             results.append(res)
             count += 1
-            print(f"Processed {count}/{args.limit}...")
+            print(f"Processed {count} cases.")
     
+    # Save Full Results
     Path(args.output).write_text(json.dumps(results, indent=2, ensure_ascii=False))
-    print(f"Done. Saved to {args.output}")
+    print(f"Done. Saved full results to {args.output}")
+
+    # Generate and Save Filtered Results:
+    # Criteria: Big Model Continuation is Wrong AND Small Model Continuation is Correct
+    filtered_results = [
+        r for r in results 
+        if (not r['big_model']['is_correct_continuation']) and r['small_model']['is_correct_continuation']
+    ]
+    
+    # We construct the filtered filename based on the output filename
+    output_path = Path(args.output)
+    filtered_filename = output_path.stem + "_filtered" + output_path.suffix
+    filtered_path = output_path.parent / filtered_filename
+    
+    filtered_path.write_text(json.dumps(filtered_results, indent=2, ensure_ascii=False))
+    print(f"Saved filtered results ({len(filtered_results)} cases) to {filtered_path}")
 
 if __name__ == "__main__":
     main()
