@@ -1,0 +1,189 @@
+import argparse
+import json
+import torch
+from pathlib import Path
+from typing import Any, Dict, List
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from data_loader import format_prompt
+
+def load_model_and_tokenizer(model_path: str):
+    print(f"Loading model from {model_path}...")
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+        torch_dtype="auto",
+        device_map="auto",
+    )
+    model.eval()
+    return tokenizer, model
+
+def truncate_to_error_prefix(full_response: str, error_phrase: str) -> str:
+    """
+    Find the error phrase in the full response and truncate everything after it starts.
+    Returns the prefix text (correct reasoning up to the error).
+    """
+    if not full_response or not error_phrase:
+        return ""
+    
+    # Try exact match first
+    idx = full_response.find(error_phrase)
+    
+    # If not found, distinct fallback could be implemented, but here we require a match
+    if idx == -1:
+        # Simple heuristic: ignore case or whitespace diffs could be added here
+        return ""
+        
+    # We want the text BEFORE the error phrase
+    return full_response[:idx]
+
+def get_next_token_info(model, tokenizer, input_ids, top_k=5):
+    with torch.inference_mode():
+        outputs = model(input_ids)
+        next_token_logits = outputs.logits[:, -1, :]
+        
+        # Get top-k
+        probs, indices = torch.topk(torch.softmax(next_token_logits, dim=-1), k=top_k)
+        
+        results = []
+        for i in range(top_k):
+            tok_id = indices[0][i].item()
+            prob = probs[0][i].item()
+            tok_text = tokenizer.decode([tok_id])
+            results.append({
+                "token": tok_text,
+                "prob": prob,
+                "token_id": tok_id
+            })
+    return results
+
+def generate_continuation(model, tokenizer, input_ids, max_new_tokens=128):
+    with torch.inference_mode():
+        output_ids = model.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            do_sample=False, # Use greedy for deterministic logic observation
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
+        )
+    # Only decode the *new* part
+    input_len = input_ids.shape[1]
+    generated_text = tokenizer.decode(output_ids[0][input_len:], skip_special_tokens=True)
+    return generated_text
+
+def process_case(item, small_model, small_tok, big_model, big_tok, args):
+    # 1. Get Context Info
+    question = item.get("question", "")
+    options = item.get("options", {})
+    big_resp = item.get("big_model_response", "")
+    
+    # Retrieve the phrase identified by the reviewer
+    # If using annotated file, it's inside 'review_details' -> 'phrase'
+    # Or sometimes flat if processed. Let's look for review_details first.
+    error_phrase = ""
+    details = item.get("review_details", {})
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except:
+            details = {}
+    
+    if isinstance(details, dict):
+        error_phrase = details.get("phrase") or details.get("first_wrong_phrase", "")
+    
+    # If explicit position is available and trustworthy, we can use that too, 
+    # but the user specifically asked to "find the phrase". 
+    # Let's try to locate the phrase for exact logical cut-off.
+    if not error_phrase:
+        return None 
+
+    prefix_text = truncate_to_error_prefix(big_resp, error_phrase)
+    if not prefix_text:
+        # Fallback: if finding phrase fails, maybe use review_first_error_pos if available
+        err_pos = item.get("review_first_error_pos")
+        if err_pos and isinstance(err_pos, int) and err_pos > 1:
+             prefix_text = big_resp[:err_pos-1]
+        else:
+            return None
+
+    print(f"Case {item.get('id')}: Found prefix of length {len(prefix_text)} chars.")
+
+    # 2. Construct Prompt inputs for both models
+    # We need to recreate the prompt as if the model had just generated 'prefix_text'
+    # Format: User Prompt + Assistant Start + prefix_text
+    
+    # Note: We must use the respective tokenizer's template
+    # Small Model
+    prompt_small = format_prompt(small_tok, question, options) 
+    # format_prompt returns full string with <|im_start|>...
+    # We apply the prefix. 
+    # CAUTION: format_prompt typically adds generation prompt (e.g. <|im_start|>assistant\n)
+    # So we just append the text.
+    full_input_str_small = prompt_small + prefix_text
+    input_ids_small = small_tok(full_input_str_small, return_tensors="pt").input_ids.to(small_model.device)
+    
+    # Big Model
+    prompt_big = format_prompt(big_tok, question, options)
+    full_input_str_big = prompt_big + prefix_text
+    input_ids_big = big_tok(full_input_str_big, return_tensors="pt").input_ids.to(big_model.device)
+
+    # 3. Inspect Logits (Micro)
+    grad_small = get_next_token_info(small_model, small_tok, input_ids_small, top_k=5)
+    grad_big = get_next_token_info(big_model, big_tok, input_ids_big, top_k=5)
+    
+    # 4. Generate Continuation (Macro)
+    # See where they go from here
+    cont_small = generate_continuation(small_model, small_tok, input_ids_small, max_new_tokens=100)
+    cont_big = generate_continuation(big_model, big_tok, input_ids_big, max_new_tokens=100)
+
+    return {
+        "id": item.get("id"),
+        "error_phrase_identified": error_phrase,
+        "prefix_context": prefix_text,
+        "small_model": {
+            "next_token_top5": grad_small,
+            "continuation": cont_small
+        },
+        "big_model": {
+            "next_token_top5": grad_big,
+            "continuation": cont_big
+        }
+    }
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--annotated_file", required=True, help="Annotated JSON file")
+    parser.add_argument("--small_model", default="/data/ocean/decoding/model/II-Medical-8B")
+    parser.add_argument("--big_model", default="/data/ocean/decoding/model/Qwen/Qwen3-14B")
+    parser.add_argument("--limit", type=int, default=10, help="Check first N cases")
+    parser.add_argument("--output", default="logs/logic_divergence.json")
+    args = parser.parse_args()
+
+    # Load Data
+    data = json.loads(Path(args.annotated_file).read_text())
+    
+    # Load Models
+    small_tok, small_model = load_model_and_tokenizer(args.small_model)
+    big_tok, big_model = load_model_and_tokenizer(args.big_model)
+    
+    results = []
+    count = 0
+    for item in data:
+        if args.limit and count >= args.limit:
+            break
+            
+        res = process_case(item, small_model, small_tok, big_model, big_tok, args)
+        if res:
+            results.append(res)
+            count += 1
+            print(f"Processed {count}/{args.limit}...")
+    
+    Path(args.output).write_text(json.dumps(results, indent=2, ensure_ascii=False))
+    print(f"Done. Saved to {args.output}")
+
+if __name__ == "__main__":
+    main()
