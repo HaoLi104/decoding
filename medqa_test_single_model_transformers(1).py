@@ -132,7 +132,7 @@ def generate_answers_transformers(
     texts = []
     for i, out_ids in enumerate(gen_ids):
         gen_part = out_ids[prompt_lens[i]:]
-        texts.append(tokenizer.decode(gen_part, skip_special_tokens=True))
+        texts.append(tokenizer.decode(gen_part, skip_special_tokens=False))
     return texts
 
 
