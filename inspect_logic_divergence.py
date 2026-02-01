@@ -102,7 +102,7 @@ def get_next_token_info(model, tokenizer, input_ids, top_k=5):
             })
     return results
 
-def generate_continuation(model, tokenizer, input_ids, max_new_tokens=512):
+def generate_continuation(model, tokenizer, input_ids, max_new_tokens=1024):
     with torch.inference_mode():
         output_ids = model.generate(
             input_ids,
@@ -178,8 +178,8 @@ def process_case(item, small_model, small_tok, big_model, big_tok, args):
     
     # 4. Generate Continuation (Macro)
     # See where they go from here. We use a larger max_new_tokens to hopefully reach the answer.
-    cont_small = generate_continuation(small_model, small_tok, input_ids_small, max_new_tokens=512)
-    cont_big = generate_continuation(big_model, big_tok, input_ids_big, max_new_tokens=512)
+    cont_small = generate_continuation(small_model, small_tok, input_ids_small, max_new_tokens=1024)
+    cont_big = generate_continuation(big_model, big_tok, input_ids_big, max_new_tokens=1024)
 
     # 5. Extract Answers and Check Correctness
     ground_truth = item.get("ground_truth", "").strip().upper()
