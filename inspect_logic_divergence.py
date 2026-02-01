@@ -1,11 +1,52 @@
 import argparse
 import json
+import re
 import torch
 from pathlib import Path
 from typing import Any, Dict, List
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from data_loader import format_prompt
+
+# Regex patterns for extracting answers
+ANSWER_PATTERNS = [
+    re.compile(r"final answer\s*[:：]?\s*([A-D])", re.IGNORECASE),
+    re.compile(r"the answer is\s*([A-D])", re.IGNORECASE),
+    re.compile(r"answer\s*[:：]?\s*([A-D])", re.IGNORECASE),
+    re.compile(r"option\s*([A-D])", re.IGNORECASE),
+    re.compile(r"选项\s*[:：]?\s*([A-D])", re.IGNORECASE),
+    re.compile(r"答案\s*[:：]?\s*([A-D])", re.IGNORECASE),
+    re.compile(r"(?:final\s+answer|the\s+answer\s+is|conclusion|答案|结论)\s*[:：]?\s*([A-D])", re.IGNORECASE),
+    re.compile(r"(?:\[|【|\(|\（)\s*([A-D])\s*(?:\]|】|\)|\）)", re.IGNORECASE),
+    re.compile(r"\b([A-D])\b\s*(?:is\s+the\s+correct\s+answer|是正确答案|是最终选择)", re.IGNORECASE),
+]
+LIST_FINAL_PATTERN = re.compile(r"\*\*([A-D])\.\s", re.IGNORECASE)
+
+def extract_answer(text: str) -> str:
+    """Extracts the final answer option from the model output."""
+    if not text:
+        return ""
+    
+    # Look at the end of the text first
+    search_text = text[-400:] if len(text) > 400 else text
+
+    for pattern in ANSWER_PATTERNS:
+        m = pattern.search(search_text)
+        if m:
+            return m.group(1).upper()
+
+    # If no pattern at the end, search specifically for bolded options as a fallback
+    m_list = LIST_FINAL_PATTERN.findall(search_text)
+    if m_list:
+        return m_list[-1].upper()
+    
+    # Last resort: search the whole text
+    for pattern in ANSWER_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return m.group(1).upper()
+
+    return ""
 
 def load_model_and_tokenizer(model_path: str):
     print(f"Loading model from {model_path}...")
@@ -61,7 +102,7 @@ def get_next_token_info(model, tokenizer, input_ids, top_k=5):
             })
     return results
 
-def generate_continuation(model, tokenizer, input_ids, max_new_tokens=128):
+def generate_continuation(model, tokenizer, input_ids, max_new_tokens=512):
     with torch.inference_mode():
         output_ids = model.generate(
             input_ids,
@@ -136,21 +177,37 @@ def process_case(item, small_model, small_tok, big_model, big_tok, args):
     grad_big = get_next_token_info(big_model, big_tok, input_ids_big, top_k=5)
     
     # 4. Generate Continuation (Macro)
-    # See where they go from here
-    cont_small = generate_continuation(small_model, small_tok, input_ids_small, max_new_tokens=100)
-    cont_big = generate_continuation(big_model, big_tok, input_ids_big, max_new_tokens=100)
+    # See where they go from here. We use a larger max_new_tokens to hopefully reach the answer.
+    cont_small = generate_continuation(small_model, small_tok, input_ids_small, max_new_tokens=512)
+    cont_big = generate_continuation(big_model, big_tok, input_ids_big, max_new_tokens=512)
+
+    # 5. Extract Answers and Check Correctness
+    ground_truth = item.get("ground_truth", "").strip().upper()
+    
+    # We examine the continuation solely for the answer, 
+    # assuming the model follows the "Final answer: X" format at the end.
+    ans_small = extract_answer(cont_small)
+    ans_big = extract_answer(cont_big)
+    
+    small_correct = (ans_small == ground_truth) if ans_small else False
+    big_correct = (ans_big == ground_truth) if ans_big else False
 
     return {
         "id": item.get("id"),
+        "ground_truth": ground_truth,
         "error_phrase_identified": error_phrase,
         "prefix_context": prefix_text,
         "small_model": {
             "next_token_top5": grad_small,
-            "continuation": cont_small
+            "continuation": cont_small,
+            "extracted_answer": ans_small,
+            "is_correct_continuation": small_correct
         },
         "big_model": {
             "next_token_top5": grad_big,
-            "continuation": cont_big
+            "continuation": cont_big,
+            "extracted_answer": ans_big,
+            "is_correct_continuation": big_correct
         }
     }
 
