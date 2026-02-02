@@ -1,12 +1,23 @@
 import argparse
 import json
 import re
+import sys
+import traceback
 import torch
 from pathlib import Path
 from typing import Any, Dict, List
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from data_loader import format_prompt
+# Force flush for debugging
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
+
+try:
+    from data_loader import format_prompt
+except ImportError:
+    print("Error importing data_loader. Make sure data_loader.py is in the same directory.", file=sys.stderr)
+    traceback.print_exc()
+    sys.exit(1)
 
 # Regex patterns for extracting answers
 ANSWER_PATTERNS = [
@@ -143,6 +154,7 @@ def process_case(item, small_model, small_tok, big_model, big_tok, args):
     # but the user specifically asked to "find the phrase". 
     # Let's try to locate the phrase for exact logical cut-off.
     if not error_phrase:
+        # print(f"Case {item.get('id')}: No error_phrase found in review_details. Skipping.")
         return None 
 
     prefix_text = truncate_to_error_prefix(big_resp, error_phrase)
@@ -152,6 +164,7 @@ def process_case(item, small_model, small_tok, big_model, big_tok, args):
         if err_pos and isinstance(err_pos, int) and err_pos > 1:
              prefix_text = big_resp[:err_pos-1]
         else:
+            print(f"Case {item.get('id')}: Could not locate error phrase '{error_phrase[:20]}...' in response. Skipping.")
             return None
 
     print(f"Case {item.get('id')}: Found prefix of length {len(prefix_text)} chars.")
@@ -263,4 +276,10 @@ def main():
     print(f"Saved filtered results ({len(filtered_results)} cases) to {filtered_path}")
 
 if __name__ == "__main__":
-    main()
+    print("Script started...", flush=True)
+    try:
+        main()
+    except Exception as e:
+        print("\n\nCRITICAL ERROR IN MAIN EXECUTION:", file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)
