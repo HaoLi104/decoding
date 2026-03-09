@@ -396,6 +396,15 @@ def main() -> None:
 		help="Limit dataset size when --source medqa is used (0 = full)",
 	)
 	parser.add_argument(
+		"--prefilter_limit",
+		type=int,
+		default=None,
+		help=(
+			"Only consider first N cases BEFORE filtering/mining (debug/perf knob). "
+			"Prefer using --dataset_limit for --source medqa."
+		),
+	)
+	parser.add_argument(
 		"--cases",
 		default="logs/medqa_big_wrong_small_right_annotated.json",
 		help="Input JSON (list of dicts) with at least question/options/ground_truth (only used when --source json)",
@@ -433,7 +442,15 @@ def main() -> None:
 		action="store_true",
 		help="Allow tokenizer/model vocab mismatch (NOT recommended; may corrupt mining)",
 	)
-	parser.add_argument("--limit", type=int, default=None, help="Only process first N cases (debug)")
+	parser.add_argument(
+		"--limit",
+		type=int,
+		default=None,
+		help=(
+			"Only process first N kept cases AFTER filtering (debug). "
+			"(Use --prefilter_limit to cap work before filtering.)"
+		),
+	)
 	parser.add_argument(
 		"--use_input_correctness",
 		action="store_true",
@@ -493,8 +510,8 @@ def main() -> None:
 		if not isinstance(cases, list):
 			raise ValueError("--cases must be a JSON list")
 
-	if args.limit is not None:
-		cases = cases[: args.limit]
+	if args.prefilter_limit is not None:
+		cases = cases[: args.prefilter_limit]
 
 	if args.use_model_loader:
 		from model_loader import get_model_and_tokenizer
@@ -567,6 +584,9 @@ def main() -> None:
 				print(f"[filter] {idx + 1}/{len(cases)} checked, kept={len(kept_cases)}")
 	else:
 		kept_cases = list(_iter_filtered_cases(cases, use_input_correctness=args.use_input_correctness))
+
+	if args.limit is not None:
+		kept_cases = kept_cases[: args.limit]
 
 	total_points = 0
 	for idx, item in enumerate(kept_cases):
