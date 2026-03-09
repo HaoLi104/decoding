@@ -84,6 +84,16 @@ def load_tokenizer(tokenizer_path: str):
 	return tok
 
 
+def _tokenize_prompt(tokenizer, prompt: str) -> Dict[str, torch.Tensor]:
+	"""Tokenize prompt in a way that works across Transformers versions."""
+	encoded = tokenizer(prompt, return_tensors="pt")
+	input_ids = encoded["input_ids"]
+	attention_mask = encoded.get("attention_mask", None)
+	if attention_mask is None:
+		attention_mask = torch.ones_like(input_ids)
+	return {"input_ids": input_ids, "attention_mask": attention_mask}
+
+
 @torch.inference_mode()
 def _forward_last_hidden_and_logits(
 	model: AutoModelForCausalLM,
@@ -216,7 +226,7 @@ def _judge_correctness(
 	gt = str(item.get("ground_truth", "")).strip().upper()
 
 	prompt = format_prompt(tokenizer, question, options)
-	encoded = tokenizer(prompt, return_tensors="pt", return_dict=True)
+	encoded = _tokenize_prompt(tokenizer, prompt)
 	in_ids = encoded["input_ids"]
 	in_mask = encoded["attention_mask"]
 
@@ -269,7 +279,7 @@ def mine_case(
 	gt = str(item.get("ground_truth", "")).strip().upper()
 
 	prompt = format_prompt(tokenizer, question, options)
-	encoded = tokenizer(prompt, return_tensors="pt", return_dict=True)
+	encoded = _tokenize_prompt(tokenizer, prompt)
 	prompt_ids_cpu = encoded["input_ids"]
 	prompt_mask_cpu = encoded["attention_mask"]
 
