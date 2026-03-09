@@ -131,6 +131,22 @@ def _as_1x1(token_id: int) -> torch.Tensor:
 	return torch.tensor([[token_id]], dtype=torch.long)
 
 
+def _restricted_argmax_token_id(next_logits: torch.Tensor, tok_len: int) -> int:
+	"""Argmax next-token id, optionally restricting to ids < tok_len.
+
+	This is important when a model's output vocab is larger than the tokenizer length.
+	Without this restriction, a model may select token ids that the shared tokenizer cannot
+	decode or that other models cannot safely consume.
+	"""
+	if next_logits.dim() == 1:
+		next_logits = next_logits.unsqueeze(0)
+	if tok_len and next_logits.size(-1) > tok_len:
+		# Mask out logits for token ids that this tokenizer can't represent.
+		masked = next_logits[..., :tok_len]
+		return int(masked.argmax(dim=-1).item())
+	return int(next_logits.argmax(dim=-1).item())
+
+
 def _concat_features(vs: List[torch.Tensor]) -> np.ndarray:
 	parts = [v.detach().to(dtype=torch.float32).cpu().numpy().reshape(-1) for v in vs]
 	return np.concatenate(parts, axis=0)
@@ -154,15 +170,34 @@ def _iter_filtered_cases(
 
 
 def _assert_vocab_compatible(tokenizer, models: Dict[str, AutoModelForCausalLM], allow_mismatch: bool) -> None:
-	tok_vs = int(getattr(tokenizer, "vocab_size", 0) or 0)
+	# NOTE: For many HF tokenizers, `tokenizer.vocab_size` excludes added tokens.
+	# What actually matters for safety is: max possible token id produced by this tokenizer
+	# must be < model input embedding size for every model we feed these ids into.
+	try:
+		tok_len = int(len(tokenizer))
+	except Exception:
+		tok_len = int(getattr(tokenizer, "vocab_size", 0) or 0)
+
 	bad: List[str] = []
 	for name, model in models.items():
-		m_vs = int(getattr(getattr(model, "config", None), "vocab_size", 0) or 0)
-		if tok_vs and m_vs and tok_vs != m_vs:
-			bad.append(f"{name}: model_vocab_size={m_vs} tokenizer_vocab_size={tok_vs}")
+		m_vs_cfg = int(getattr(getattr(model, "config", None), "vocab_size", 0) or 0)
+		try:
+			emb = model.get_input_embeddings()
+			m_vs_emb = int(getattr(emb, "num_embeddings", 0) or 0) if emb is not None else 0
+		except Exception:
+			m_vs_emb = 0
+
+		m_vs = m_vs_emb or m_vs_cfg
+		if tok_len and m_vs and tok_len > m_vs:
+			bad.append(
+				f"{name}: model_vocab_size={m_vs} tokenizer_len={tok_len} "
+				f"(config_vocab_size={m_vs_cfg}, embedding_vocab_size={m_vs_emb})"
+			)
+
 	if bad and not allow_mismatch:
 		raise ValueError(
-			"Tokenizer/model vocab_size mismatch (unsafe to feed the same input_ids). "
+			"Tokenizer/model vocab mismatch: tokenizer can produce token ids that exceed at least one model's "
+			"input embedding size (unsafe to feed the same input_ids). "
 			"Pass --allow_tokenizer_mismatch to override (not recommended). Details: "
 			+ "; ".join(bad)
 		)
@@ -245,6 +280,11 @@ def mine_case(
 	cur_ids_cpu = prompt_ids_cpu
 	cur_mask_cpu = prompt_mask_cpu
 
+	try:
+		tok_len = int(len(tokenizer))
+	except Exception:
+		tok_len = int(getattr(tokenizer, "vocab_size", 0) or 0)
+
 	generated_target: List[int] = []
 	mined: List[Dict[str, Any]] = []
 
@@ -266,8 +306,8 @@ def mine_case(
 			last_h[name] = h
 			next_logits[name] = logits
 
-		next_t = int(next_logits["target"].argmax(dim=-1).item())
-		next_d = int(next_logits["draft"].argmax(dim=-1).item())
+		next_t = _restricted_argmax_token_id(next_logits["target"], tok_len)
+		next_d = _restricted_argmax_token_id(next_logits["draft"], tok_len)
 
 		# Divergence point: draft(expert) disagrees with target.
 		if next_d != next_t:
