@@ -1,12 +1,18 @@
 """Automatic mining of training data for the accept/reject token classifier.
 
 Implements the workflow described in project.md:
-1) Start from cases where target is wrong and small is correct.
-2) Walk along the target generation prefix; at each step, ask small model for the next token.
-   If small's greedy next token differs from target's greedy next token, we found a divergence point.
-3) Force the divergence token (small token) into target context, let target continue generation.
+This script follows the 3-model setup described in project.md:
+- target: a general big model (e.g., Qwen-14B)
+- draft: a domain expert small model (e.g., II-Medical-8B)
+- small_base: the base model corresponding to the expert (e.g., Qwen-8B-Base)
+
+Mining workflow:
+1) Start from cases where target is wrong and draft is correct.
+2) Walk along the target generation prefix; at each step, ask draft for the next token.
+	If draft's greedy next token differs from target's greedy next token, we found a divergence point.
+3) Force the divergence token (draft token) into target context, let target continue generation.
    If target can recover and end with the correct answer, label this token as IMPORTANT (True), else False.
-4) For each divergence point, extract and concatenate hidden states from (target, draft, small) models.
+4) For each divergence point, extract and concatenate hidden states from (target, draft, small_base) models.
 
 Outputs:
 - <out_prefix>.meta.jsonl: one record per mined divergence point
@@ -138,10 +144,12 @@ def _iter_filtered_cases(
 		yield from cases
 		return
 
+	# Backward compatibility for legacy JSONs that already store correctness flags.
+	# We interpret them as: big_model_is_correct -> target correctness; small_model_is_correct -> draft correctness.
 	for item in cases:
-		big_ok = _maybe_bool(item.get("big_model_is_correct"))
-		small_ok = _maybe_bool(item.get("small_model_is_correct"))
-		if big_ok is False and small_ok is True:
+		target_ok = _maybe_bool(item.get("big_model_is_correct"))
+		draft_ok = _maybe_bool(item.get("small_model_is_correct"))
+		if target_ok is False and draft_ok is True:
 			yield item
 
 
@@ -165,7 +173,7 @@ def _judge_correctness(
 	item: Dict[str, Any],
 	tokenizer,
 	target: AutoModelForCausalLM,
-	small: AutoModelForCausalLM,
+	draft: AutoModelForCausalLM,
 	max_new_tokens: int,
 ) -> Dict[str, Any]:
 	question = item.get("question", "")
@@ -178,7 +186,7 @@ def _judge_correctness(
 	in_mask = encoded["attention_mask"]
 
 	dev_t = _device_of(target)
-	dev_s = _device_of(small)
+	dev_d = _device_of(draft)
 
 	out_t = _generate_from_input_ids(
 		model=target,
@@ -187,26 +195,26 @@ def _judge_correctness(
 		attention_mask=in_mask.to(dev_t),
 		max_new_tokens=max_new_tokens,
 	)
-	out_s = _generate_from_input_ids(
-		model=small,
+	out_d = _generate_from_input_ids(
+		model=draft,
 		tokenizer=tokenizer,
-		input_ids=in_ids.to(dev_s),
-		attention_mask=in_mask.to(dev_s),
+		input_ids=in_ids.to(dev_d),
+		attention_mask=in_mask.to(dev_d),
 		max_new_tokens=max_new_tokens,
 	)
 
 	dec_t = tokenizer.decode(out_t[0], skip_special_tokens=True)
-	dec_s = tokenizer.decode(out_s[0], skip_special_tokens=True)
+	dec_d = tokenizer.decode(out_d[0], skip_special_tokens=True)
 	pred_t = extract_answer(dec_t)
-	pred_s = extract_answer(dec_s)
+	pred_d = extract_answer(dec_d)
 	ok_t = bool(pred_t) and pred_t == gt
-	ok_s = bool(pred_s) and pred_s == gt
+	ok_d = bool(pred_d) and pred_d == gt
 	return {
 		"gt": gt,
 		"target_pred": pred_t,
-		"small_pred": pred_s,
+		"draft_pred": pred_d,
 		"target_correct": bool(ok_t),
-		"small_correct": bool(ok_s),
+		"draft_correct": bool(ok_d),
 	}
 
 
@@ -215,7 +223,7 @@ def mine_case(
 	tokenizer,
 	target: AutoModelForCausalLM,
 	draft: AutoModelForCausalLM,
-	small: AutoModelForCausalLM,
+	small_base: AutoModelForCausalLM,
 	max_prefix_steps: int,
 	max_new_tokens_after: int,
 	max_points_per_case: int,
@@ -230,7 +238,7 @@ def mine_case(
 	prompt_ids_cpu = encoded["input_ids"]
 	prompt_mask_cpu = encoded["attention_mask"]
 
-	models = {"target": target, "draft": draft, "small": small}
+	models = {"target": target, "draft": draft, "small_base": small_base}
 	devices = {k: _device_of(m) for k, m in models.items()}
 	past = {k: None for k in models}
 
@@ -259,18 +267,19 @@ def mine_case(
 			next_logits[name] = logits
 
 		next_t = int(next_logits["target"].argmax(dim=-1).item())
-		next_s = int(next_logits["small"].argmax(dim=-1).item())
+		next_d = int(next_logits["draft"].argmax(dim=-1).item())
 
-		if next_s != next_t:
-			feat = _concat_features([last_h["target"], last_h["draft"], last_h["small"]])
-			token_text = tokenizer.decode([next_s], skip_special_tokens=True)
+		# Divergence point: draft(expert) disagrees with target.
+		if next_d != next_t:
+			feat = _concat_features([last_h["target"], last_h["draft"], last_h["small_base"]])
+			token_text = tokenizer.decode([next_d], skip_special_tokens=True)
 
 			prefix_ids = (
 				torch.tensor([generated_target], dtype=torch.long)
 				if generated_target
 				else torch.empty((1, 0), dtype=torch.long)
 			)
-			forced_input_ids_cpu = torch.cat([prompt_ids_cpu, prefix_ids, _as_1x1(next_s)], dim=1)
+			forced_input_ids_cpu = torch.cat([prompt_ids_cpu, prefix_ids, _as_1x1(next_d)], dim=1)
 			forced_mask_cpu = torch.ones_like(forced_input_ids_cpu)
 
 			out_ids = _generate_from_input_ids(
@@ -290,8 +299,8 @@ def mine_case(
 					"step": step,
 					"gt": gt,
 					"target_next_token_id": next_t,
-					"small_next_token_id": next_s,
-					"small_next_token_text": token_text,
+					"draft_next_token_id": next_d,
+					"draft_next_token_text": token_text,
 					"label_important": bool(is_correct),
 					"forced_pred": pred,
 					"feature": feat,
@@ -316,9 +325,30 @@ def main() -> None:
 		description="Mine training data (hidden states + labels) for token accept/reject classifier"
 	)
 	parser.add_argument(
+		"--source",
+		choices=["json", "medqa"],
+		default="json",
+		help=(
+			"Where to load candidate questions from. "
+			"IMPORTANT: if you use a JSON produced by other models (e.g., Qwen), it biases the pool; "
+			"prefer --source medqa + --filter_with_models for a clean pipeline."
+		),
+	)
+	parser.add_argument(
+		"--medqa_split",
+		default="test",
+		help="MedQA split when --source medqa is used (train/test)",
+	)
+	parser.add_argument(
+		"--dataset_limit",
+		type=int,
+		default=0,
+		help="Limit dataset size when --source medqa is used (0 = full)",
+	)
+	parser.add_argument(
 		"--cases",
 		default="logs/medqa_big_wrong_small_right_annotated.json",
-		help="Input JSON (list of dicts) with at least question/options/ground_truth",
+		help="Input JSON (list of dicts) with at least question/options/ground_truth (only used when --source json)",
 	)
 	parser.add_argument(
 		"--out_prefix",
@@ -326,8 +356,13 @@ def main() -> None:
 		help="Output prefix; writes .meta.jsonl/.features.npz/.info.json",
 	)
 	parser.add_argument("--target_model", default=None, help="HF path/id for target model")
-	parser.add_argument("--draft_model", default=None, help="HF path/id for draft model")
-	parser.add_argument("--small_model", default=None, help="HF path/id for small model")
+	parser.add_argument("--draft_model", default=None, help="HF path/id for draft model (domain expert)")
+	parser.add_argument("--small_base_model", default=None, help="HF path/id for small_base model")
+	parser.add_argument(
+		"--small_model",
+		default=None,
+		help="Alias of --small_base_model (kept for backward compatibility)",
+	)
 	parser.add_argument(
 		"--use_model_loader",
 		action="store_true",
@@ -357,7 +392,7 @@ def main() -> None:
 	parser.add_argument(
 		"--filter_with_models",
 		action="store_true",
-		help="Filter cases by running target/small generation with current models (target wrong, small right)",
+		help="Filter cases by running target/draft generation with current models (target wrong, draft right)",
 	)
 	parser.add_argument(
 		"--eval_max_new_tokens",
@@ -382,9 +417,32 @@ def main() -> None:
 
 	args = parser.parse_args()
 
-	cases = _load_json(args.cases)
-	if not isinstance(cases, list):
-		raise ValueError("--cases must be a JSON list")
+	if args.source == "medqa":
+		from data_loader import load_medqa
+
+		# Full MedQA candidate pool (no pre-filtering by other models)
+		ds = load_medqa(split=args.medqa_split, limit=args.dataset_limit or 0)
+		cases = []
+		for idx, item in enumerate(ds):
+			q = item.get("question", "")
+			opts = item.get("options", {})
+			gt = item.get("answer_idx", "")
+			gt = str(gt).strip().upper() if gt is not None else ""
+			if not q or not opts or gt not in {"A", "B", "C", "D"}:
+				continue
+			cases.append(
+				{
+					"id": str(item.get("id", idx)),
+					"question": q,
+					"options": opts,
+					"ground_truth": gt,
+				}
+			)
+	else:
+		cases = _load_json(args.cases)
+		if not isinstance(cases, list):
+			raise ValueError("--cases must be a JSON list")
+
 	if args.limit is not None:
 		cases = cases[: args.limit]
 
@@ -393,38 +451,41 @@ def main() -> None:
 
 		models, tokenizer = get_model_and_tokenizer()
 		target = models["target"]
-		draft = models["base"]
-		small = models["expert"]
+		# NOTE: model_loader returns keys {target, base, expert}
+		# In project.md definitions: draft=expert, small_base=base.
+		small_base = models["base"]
+		draft = models["expert"]
 		_assert_vocab_compatible(
 			tokenizer,
-			{"target": target, "draft": draft, "small": small},
+			{"target": target, "draft": draft, "small_base": small_base},
 			allow_mismatch=args.allow_tokenizer_mismatch,
 		)
 		model_specs = [
 			ModelSpec("target", "config:ModelIDs.TARGET"),
-			ModelSpec("draft", "config:ModelIDs.DRAFT_BASE"),
-			ModelSpec("small", "config:ModelIDs.DRAFT_EXPERT"),
+			ModelSpec("draft", "config:ModelIDs.DRAFT_EXPERT"),
+			ModelSpec("small_base", "config:ModelIDs.DRAFT_BASE"),
 		]
 	else:
-		if not (args.target_model and args.draft_model and args.small_model):
+		small_base_path = args.small_base_model or args.small_model
+		if not (args.target_model and args.draft_model and small_base_path):
 			raise ValueError(
-				"Provide --target_model/--draft_model/--small_model, or pass --use_model_loader"
+				"Provide --target_model/--draft_model/--small_base_model (or --small_model), or pass --use_model_loader"
 			)
 
 		tokenizer_path = args.tokenizer or args.target_model
 		tokenizer = load_tokenizer(tokenizer_path)
 		target = load_hf_model(args.target_model, device_map=args.device_map)
 		draft = load_hf_model(args.draft_model, device_map=args.device_map)
-		small = load_hf_model(args.small_model, device_map=args.device_map)
+		small_base = load_hf_model(small_base_path, device_map=args.device_map)
 		_assert_vocab_compatible(
 			tokenizer,
-			{"target": target, "draft": draft, "small": small},
+			{"target": target, "draft": draft, "small_base": small_base},
 			allow_mismatch=args.allow_tokenizer_mismatch,
 		)
 		model_specs = [
 			ModelSpec("target", args.target_model),
 			ModelSpec("draft", args.draft_model),
-			ModelSpec("small", args.small_model),
+			ModelSpec("small_base", small_base_path),
 		]
 
 	out_prefix = Path(args.out_prefix)
@@ -447,10 +508,10 @@ def main() -> None:
 				item=item,
 				tokenizer=tokenizer,
 				target=target,
-				small=small,
+				draft=draft,
 				max_new_tokens=args.eval_max_new_tokens,
 			)
-			if (not res["target_correct"]) and res["small_correct"]:
+			if (not res["target_correct"]) and res["draft_correct"]:
 				kept_cases.append(item)
 			if (idx + 1) % 10 == 0:
 				print(f"[filter] {idx + 1}/{len(cases)} checked, kept={len(kept_cases)}")
@@ -464,7 +525,7 @@ def main() -> None:
 			tokenizer=tokenizer,
 			target=target,
 			draft=draft,
-			small=small,
+			small_base=small_base,
 			max_prefix_steps=args.max_prefix_steps,
 			max_new_tokens_after=args.max_new_tokens_after,
 			max_points_per_case=args.max_points_per_case,
