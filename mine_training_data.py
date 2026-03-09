@@ -357,7 +357,9 @@ def mine_case(
 				}
 			)
 
-			if len(mined) >= max_points_per_case:
+			# By default we want to mine multiple divergence points per case.
+			# Interpret max_points_per_case=0 as "no limit".
+			if max_points_per_case and len(mined) >= max_points_per_case:
 				break
 
 		generated_target.append(next_t)
@@ -477,8 +479,11 @@ def main() -> None:
 	parser.add_argument(
 		"--max_points_per_case",
 		type=int,
-		default=1,
-		help="Max divergence points to mine per case (1 = first divergence only)",
+		default=0,
+		help=(
+			"Max divergence points to mine per case. "
+			"0 = mine all divergence points up to --max_prefix_steps; 1 = first divergence only."
+		),
 	)
 	parser.add_argument("--stop_on_eos", action="store_true", help="Stop prefix scan when target outputs EOS")
 
@@ -626,6 +631,7 @@ def main() -> None:
 		"max_prefix_steps": int(args.max_prefix_steps),
 		"max_new_tokens_after": int(args.max_new_tokens_after),
 		"max_points_per_case": int(args.max_points_per_case),
+		"max_points_per_case_semantics": "0 = unlimited; N>0 = cap per case",
 		"use_input_correctness": bool(args.use_input_correctness),
 		"tokenizer": {
 			"name_or_path": getattr(tokenizer, "name_or_path", ""),
