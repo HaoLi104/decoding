@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -155,6 +156,23 @@ def _restricted_argmax_token_id(next_logits: torch.Tensor, tok_len: int) -> int:
 		masked = next_logits[..., :tok_len]
 		return int(masked.argmax(dim=-1).item())
 	return int(next_logits.argmax(dim=-1).item())
+
+
+def _token_prob_from_logits(next_logits: torch.Tensor, token_id: int, tok_len: int) -> float:
+	"""Compute p(token_id) under a 1-step logits vector.
+
+	If model vocab is larger than the tokenizer length, we restrict the softmax support to
+	[0, tok_len) to keep the probability meaningful under the shared tokenizer space.
+	"""
+	if next_logits.dim() == 1:
+		next_logits = next_logits.unsqueeze(0)
+	if tok_len and next_logits.size(-1) > tok_len:
+		next_logits = next_logits[..., :tok_len]
+	if token_id < 0 or token_id >= next_logits.size(-1):
+		return 0.0
+	logp = torch.log_softmax(next_logits, dim=-1)[0, token_id].item()
+	# exp(logp) is safe here since it's a scalar
+	return float(math.exp(logp))
 
 
 def _concat_features(vs: List[torch.Tensor]) -> np.ndarray:
@@ -322,6 +340,9 @@ def mine_case(
 		# Divergence point: draft(expert) disagrees with target.
 		if next_d != next_t:
 			feat = _concat_features([last_h["target"], last_h["draft"], last_h["small_base"]])
+			p_draft = _token_prob_from_logits(next_logits["draft"], next_d, tok_len)
+			p_base = _token_prob_from_logits(next_logits["small_base"], next_d, tok_len)
+			delta_p = float(p_draft - p_base)
 			token_text = tokenizer.decode([next_d], skip_special_tokens=True)
 
 			prefix_ids = (
@@ -351,6 +372,9 @@ def mine_case(
 					"target_next_token_id": next_t,
 					"draft_next_token_id": next_d,
 					"draft_next_token_text": token_text,
+					"p_draft": float(p_draft),
+					"p_base": float(p_base),
+					"delta_p": float(delta_p),
 					"label_important": bool(is_correct),
 					"forced_pred": pred,
 					"feature": feat,
@@ -560,6 +584,20 @@ def main() -> None:
 			ModelSpec("small_base", small_base_path),
 		]
 
+	def _hidden_size_of(m: AutoModelForCausalLM) -> int:
+		cfg = getattr(m, "config", None)
+		for k in ("hidden_size", "n_embd", "d_model"):
+			v = int(getattr(cfg, k, 0) or 0)
+			if v:
+				return v
+		return 0
+
+	hidden_sizes = {
+		"target": _hidden_size_of(target),
+		"draft": _hidden_size_of(draft),
+		"small_base": _hidden_size_of(small_base),
+	}
+
 	out_prefix = Path(args.out_prefix)
 	out_prefix.parent.mkdir(parents=True, exist_ok=True)
 
@@ -572,6 +610,9 @@ def main() -> None:
 
 	X_list: List[np.ndarray] = []
 	y_list: List[int] = []
+	delta_p_list: List[float] = []
+	p_draft_list: List[float] = []
+	p_base_list: List[float] = []
 
 	if args.filter_with_models:
 		kept_cases = []
@@ -611,6 +652,9 @@ def main() -> None:
 			feat = rec.pop("feature")
 			X_list.append(feat)
 			y_list.append(1 if rec["label_important"] else 0)
+			delta_p_list.append(float(rec.get("delta_p", 0.0)))
+			p_draft_list.append(float(rec.get("p_draft", 0.0)))
+			p_base_list.append(float(rec.get("p_base", 0.0)))
 
 			rec["feature_idx"] = len(X_list) - 1
 			with open(meta_path, "a", encoding="utf-8") as f:
@@ -622,7 +666,11 @@ def main() -> None:
 
 	X = np.stack(X_list, axis=0) if X_list else np.zeros((0, 0), dtype=np.float32)
 	y = np.array(y_list, dtype=np.int64)
-	np.savez_compressed(feats_path, X=X, y=y)
+	delta_p_arr = np.array(delta_p_list, dtype=np.float32)
+	p_draft_arr = np.array(p_draft_list, dtype=np.float32)
+	p_base_arr = np.array(p_base_list, dtype=np.float32)
+	# Save extra arrays for downstream weighting / analysis.
+	np.savez_compressed(feats_path, X=X, y=y, delta_p=delta_p_arr, p_draft=p_draft_arr, p_base=p_base_arr)
 
 	info = {
 		"n_cases_input": len(cases),
@@ -639,7 +687,23 @@ def main() -> None:
 		},
 		"models": [asdict(s) for s in model_specs],
 		"feature_dim": int(X.shape[1]) if X.ndim == 2 and X.size else 0,
+		"hidden_sizes": hidden_sizes,
+		"feature_slices": {},
+		"npz_arrays": ["X", "y", "delta_p", "p_draft", "p_base"],
 	}
+
+	# Provide stable offsets for downstream extraction (teacher/student) when sizes are known.
+	if hidden_sizes["target"] and hidden_sizes["draft"] and hidden_sizes["small_base"]:
+		a0 = 0
+		a1 = a0 + hidden_sizes["target"]
+		a2 = a1 + hidden_sizes["draft"]
+		a3 = a2 + hidden_sizes["small_base"]
+		info["feature_slices"] = {
+			"target": [a0, a1],
+			"draft": [a1, a2],
+			"small_base": [a2, a3],
+			"student_target_draft": [a0, a2],
+		}
 	info_path.write_text(json.dumps(info, ensure_ascii=False, indent=2))
 
 	print(f"Done. meta={meta_path} feats={feats_path} info={info_path}")
