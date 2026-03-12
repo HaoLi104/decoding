@@ -99,9 +99,21 @@ def roc_auc_score_np(y_true: np.ndarray, y_score: np.ndarray) -> float:
 	return float(auc)
 
 
+def sigmoid_np(x: np.ndarray) -> np.ndarray:
+	# numerically stable sigmoid for large-magnitude logits
+	x = np.asarray(x, dtype=np.float64)
+	pos_mask = x >= 0
+	neg_mask = ~pos_mask
+	out = np.empty_like(x, dtype=np.float64)
+	out[pos_mask] = 1.0 / (1.0 + np.exp(-x[pos_mask]))
+	ex = np.exp(x[neg_mask])
+	out[neg_mask] = ex / (1.0 + ex)
+	return out.astype(np.float32)
+
+
 
 def accuracy_from_logits(logits: np.ndarray, y_true: np.ndarray) -> float:
-	pred = (1.0 / (1.0 + np.exp(-logits)) >= 0.5).astype(np.int64)
+	pred = (sigmoid_np(logits) >= 0.5).astype(np.int64)
 	return float(np.mean(pred == y_true)) if y_true.size else float("nan")
 
 
@@ -189,7 +201,7 @@ def select_features(mode: str, X: np.ndarray, info: Dict[str, Any]) -> Tuple[np.
 	feature_slices = info.get("feature_slices", {})
 	if mode == "teacher":
 		return X.astype(np.float32), {"feature_mode": "teacher_full"}
-	if mode != "student":
+	if mode not in {"student", "student_hard"}:
 		raise ValueError(f"Unsupported mode: {mode}")
 
 	student_slice = feature_slices.get("student_target_draft")
@@ -475,9 +487,9 @@ def train_student_once(
 def main() -> None:
 	ap = argparse.ArgumentParser(description="Train teacher/student token classifiers on mined divergence data")
 	ap.add_argument("--prefix", required=True, help="Mined data prefix, e.g. logs/mined_full_test_qwen_dp")
-	ap.add_argument("--mode", choices=["teacher", "student"], required=True)
+	ap.add_argument("--mode", choices=["teacher", "student", "student_hard"], required=True)
 	ap.add_argument("--model_type", choices=["logistic", "mlp"], default="logistic")
-	ap.add_argument("--teacher_ckpt", default=None, help="Required for --mode student")
+	ap.add_argument("--teacher_ckpt", default=None, help="Required for --mode student; ignored for teacher/student_hard")
 	ap.add_argument("--save_dir", default="checkpoints/token_classifier", help="Directory to save checkpoints/metrics")
 	ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
 	ap.add_argument("--seed", type=int, default=42)
@@ -537,7 +549,7 @@ def main() -> None:
 	best_metrics = None
 	best_c = None
 
-	if args.mode == "teacher":
+	if args.mode in {"teacher", "student_hard"}:
 		for C in c_grid:
 			model, metrics = train_teacher_once(
 				X_train=X_train_std,
@@ -579,8 +591,8 @@ def main() -> None:
 		teacher_std = np.asarray(teacher_blob["standardizer"]["std"], dtype=np.float32)
 		X_train_teacher = apply_standardizer(X_full[train_idx], teacher_mean, teacher_std)
 		X_val_teacher = apply_standardizer(X_full[val_idx], teacher_mean, teacher_std)
-		teacher_probs_train = 1.0 / (1.0 + np.exp(-predict_logits(teacher_model, X_train_teacher, args.batch_size, device) / args.temperature))
-		teacher_probs_val = 1.0 / (1.0 + np.exp(-predict_logits(teacher_model, X_val_teacher, args.batch_size, device) / args.temperature))
+		teacher_probs_train = sigmoid_np(predict_logits(teacher_model, X_train_teacher, args.batch_size, device) / args.temperature)
+		teacher_probs_val = sigmoid_np(predict_logits(teacher_model, X_val_teacher, args.batch_size, device) / args.temperature)
 
 		for C in c_grid:
 			model, metrics = train_student_once(
@@ -614,7 +626,7 @@ def main() -> None:
 		raise RuntimeError("Training failed to produce a best model")
 
 	final_logits_val = predict_logits(best_model, X_val_std, args.batch_size, device)
-	final_probs_val = 1.0 / (1.0 + np.exp(-final_logits_val))
+	final_probs_val = sigmoid_np(final_logits_val)
 
 	ckpt_name = f"{args.mode}_{args.model_type}_{prefix.name}.pt"
 	ckpt_path = save_dir / ckpt_name
