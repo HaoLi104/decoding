@@ -11,6 +11,10 @@ SPLIT="${SPLIT:-test}"
 LIMIT="${LIMIT:-300}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-256}"
 DEVICE_MAP="${DEVICE_MAP:-auto}"
+TARGET_DEVICE_MAP="${TARGET_DEVICE_MAP:-$DEVICE_MAP}"
+DRAFT_DEVICE_MAP="${DRAFT_DEVICE_MAP:-$DEVICE_MAP}"
+SMALL_BASE_DEVICE_MAP="${SMALL_BASE_DEVICE_MAP:-$DEVICE_MAP}"
+DTYPE="${DTYPE:-auto}"
 
 OUT_DIR="${OUT_DIR:-logs/divergence_override}"
 mkdir -p "$OUT_DIR"
@@ -30,6 +34,10 @@ common_args=(
   --limit "$LIMIT"
   --max_new_tokens "$MAX_NEW_TOKENS"
   --device_map "$DEVICE_MAP"
+  --target_device_map "$TARGET_DEVICE_MAP"
+  --draft_device_map "$DRAFT_DEVICE_MAP"
+  --small_base_device_map "$SMALL_BASE_DEVICE_MAP"
+  --dtype "$DTYPE"
 )
 
 echo "[1/5] baseline"
@@ -41,6 +49,8 @@ python "$SCRIPT" \
   --limit "$LIMIT" \
   --max_new_tokens "$MAX_NEW_TOKENS" \
   --device_map "$DEVICE_MAP" \
+  --target_device_map "$TARGET_DEVICE_MAP" \
+  --dtype "$DTYPE" \
   --out "$OUT_DIR/baseline.json"
 
 echo "[2/5] strict"
@@ -53,6 +63,9 @@ python "$SCRIPT" \
   --limit "$LIMIT" \
   --max_new_tokens "$MAX_NEW_TOKENS" \
   --device_map "$DEVICE_MAP" \
+  --target_device_map "$TARGET_DEVICE_MAP" \
+  --draft_device_map "$DRAFT_DEVICE_MAP" \
+  --dtype "$DTYPE" \
   --out "$OUT_DIR/strict.json"
 
 echo "[3/5] divergence_v0"

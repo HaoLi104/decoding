@@ -70,11 +70,25 @@ def _device_of(model: AutoModelForCausalLM) -> torch.device:
     return next(model.parameters()).device
 
 
-def _load_model(model_path: str, device_map: str = "auto") -> AutoModelForCausalLM:
+def _resolve_dtype(dtype_name: str):
+    name = str(dtype_name).strip().lower()
+    if name == "auto":
+        return "auto"
+    if name in {"fp16", "float16"}:
+        return torch.float16
+    if name in {"bf16", "bfloat16"}:
+        return torch.bfloat16
+    if name in {"fp32", "float32"}:
+        return torch.float32
+    raise ValueError(f"Unsupported dtype: {dtype_name}. Use one of: auto, fp16, bf16, fp32")
+
+
+def _load_model(model_path: str, device_map: str = "auto", dtype_name: str = "auto") -> AutoModelForCausalLM:
+    dtype = _resolve_dtype(dtype_name)
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         trust_remote_code=True,
-        torch_dtype="auto",
+        dtype=dtype,
         device_map=device_map,
     )
     model.eval()
@@ -368,7 +382,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--draft_model", default=None)
     parser.add_argument("--small_base_model", default=None)
     parser.add_argument("--tokenizer", default=None)
-    parser.add_argument("--device_map", default="auto")
+    parser.add_argument("--device_map", default="auto", help="Global fallback device_map")
+    parser.add_argument("--target_device_map", default=None, help="Optional per-model device_map for target")
+    parser.add_argument("--draft_device_map", default=None, help="Optional per-model device_map for draft")
+    parser.add_argument("--small_base_device_map", default=None, help="Optional per-model device_map for small_base")
+    parser.add_argument("--dtype", default="auto", help="Model dtype: auto|fp16|bf16|fp32")
 
     parser.add_argument("--split", default="test", choices=["train", "test"])
     parser.add_argument("--limit", type=int, default=300)
@@ -397,9 +415,21 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    target = _load_model(args.target_model, device_map=args.device_map)
-    draft = _load_model(args.draft_model, device_map=args.device_map) if args.draft_model else None
-    small_base = _load_model(args.small_base_model, device_map=args.device_map) if args.small_base_model else None
+    target_device_map = args.target_device_map or args.device_map
+    draft_device_map = args.draft_device_map or args.device_map
+    small_base_device_map = args.small_base_device_map or args.device_map
+
+    target = _load_model(args.target_model, device_map=target_device_map, dtype_name=args.dtype)
+    draft = (
+        _load_model(args.draft_model, device_map=draft_device_map, dtype_name=args.dtype)
+        if args.draft_model
+        else None
+    )
+    small_base = (
+        _load_model(args.small_base_model, device_map=small_base_device_map, dtype_name=args.dtype)
+        if args.small_base_model
+        else None
+    )
 
     ds = load_medqa(split=args.split, limit=args.limit)
     cases: List[Dict[str, Any]] = []
@@ -470,6 +500,10 @@ def main() -> None:
         "avg_latency_per_case_sec": ((t_end - t_start) / n) if n else 0.0,
         "tau_delta": float(args.tau_delta),
         "tau_target_opp": float(args.tau_target_opp),
+        "dtype": args.dtype,
+        "target_device_map": target_device_map,
+        "draft_device_map": draft_device_map,
+        "small_base_device_map": small_base_device_map,
         "target_model": args.target_model,
         "draft_model": args.draft_model,
         "small_base_model": args.small_base_model,
