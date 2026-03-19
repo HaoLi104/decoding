@@ -63,6 +63,35 @@ def step_state_with_token(
     )
 
 
+@torch.inference_mode()
+def advance_state_with_tokens(
+    model: AutoModelForCausalLM,
+    state: ModelState,
+    token_ids: Sequence[int],
+    device: torch.device,
+) -> ModelState:
+    # 批量推进多个已接受 token（一次前向），
+    # 比逐 token 调 step_state_with_token 更省调度开销。
+    if not token_ids:
+        return state
+
+    input_ids = torch.tensor([list(int(t) for t in token_ids)], dtype=torch.long, device=device)
+    attn = torch.ones((1, state.seq_len + input_ids.shape[1]), dtype=torch.long, device=device)
+    out = model(
+        input_ids=input_ids,
+        attention_mask=attn,
+        use_cache=True,
+        past_key_values=state.past_key_values,
+        return_dict=True,
+    )
+    next_logits = out.logits[:, -1, :]
+    return ModelState(
+        past_key_values=out.past_key_values,
+        next_logits=next_logits,
+        seq_len=state.seq_len + input_ids.shape[1],
+    )
+
+
 def argmax_id(logits: torch.Tensor) -> int:
     if logits.dim() == 1:
         logits = logits.unsqueeze(0)

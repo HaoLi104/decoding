@@ -7,7 +7,7 @@ set -euo pipefail
 #   - tau_delta: TAU_DELTA_LIST（默认 0.2 0.5 1.0）
 #   - tau_target_opp: TAU_TARGET_OPP_LIST（默认 1.0 1.5 2.0）
 # 每个组合运行：
-#   1) strict
+#   1) standard_speculative
 #   2) divergence_v2
 # 另外会先跑一次 baseline 作为统一参照。
 
@@ -62,11 +62,11 @@ run_step "baseline (${LIMIT} cases)" \
     --max_new_tokens "$MAX_NEW_TOKENS" \
     --out "$OUT_DIR/baseline_${LIMIT}.json"
 
-# 1) K 网格：strict + v2
+# 1) K 网格：standard_speculative + v2
 for k in "${SPEC_TOKENS_LIST[@]}"; do
-  run_step "strict K=${k} (${LIMIT} cases)" \
+  run_step "standard speculative K=${k} (${LIMIT} cases)" \
     python k_spec_decode_divergence_eval.py \
-      --mode strict \
+      --mode standard_speculative \
       --target_model "$TARGET_MODEL" \
       --draft_model "$DRAFT_MODEL" \
       --tokenizer "$TOKENIZER" \
@@ -77,7 +77,7 @@ for k in "${SPEC_TOKENS_LIST[@]}"; do
       --split "$SPLIT" \
       --limit "$LIMIT" \
       --max_new_tokens "$MAX_NEW_TOKENS" \
-      --out "$OUT_DIR/strict_k${k}_${LIMIT}.json"
+      --out "$OUT_DIR/standard_speculative_k${k}_${LIMIT}.json"
 
   for tau_delta in "${TAU_DELTA_LIST[@]}"; do
     for tau_opp in "${TAU_TARGET_OPP_LIST[@]}"; do

@@ -110,7 +110,7 @@ $$
 
 ### 5.2 运行参数（首版）
 - `--speculative_tokens`（K，默认 4 或 5）
-- `--mode strict|divergence_v0|divergence_v1|divergence_v2`
+- `--mode standard_speculative|divergence_v0|divergence_v1|divergence_v2`
 - `--tau_delta`
 - `--tau_target_opp`
 - `--max_reject_rechecks`（默认 1）
@@ -193,7 +193,7 @@ $$
 
 ## 11. 里程碑
 
-- M1：完成 K-token strict（无 override）并跑通 300 题。
+- M1：完成 K-token standard_speculative（无 override）并跑通 300 题。
 - M2：接入 v0/v2 拒绝点复判，跑 300 题。
 - M3：完成 K 与阈值网格，输出 Pareto 与推荐配置。
 - M4：决定是否迁移到 `speculators-main` 的正式实现。

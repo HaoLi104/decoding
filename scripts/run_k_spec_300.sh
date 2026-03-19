@@ -4,7 +4,7 @@ set -euo pipefail
 # 300题串行脚本（快速主线实验）
 # 默认顺序：
 # 1) baseline
-# 2) strict (K-token verify, 无 override)
+# 2) standard_speculative (K-token verify, 无 override)
 # 3) divergence_v2 (K-token + 拒绝点复判)
 # 4) 汇总表 summary.md
 
@@ -58,9 +58,9 @@ run_step "baseline (${LIMIT} cases)" \
     --max_new_tokens "$MAX_NEW_TOKENS" \
     --out "$OUT_DIR/baseline_${LIMIT}.json"
 
-run_step "strict K-spec (${LIMIT} cases, K=${SPEC_TOKENS})" \
+run_step "standard speculative (${LIMIT} cases, K=${SPEC_TOKENS})" \
   python k_spec_decode_divergence_eval.py \
-    --mode strict \
+    --mode standard_speculative \
     --target_model "$TARGET_MODEL" \
     --draft_model "$DRAFT_MODEL" \
     --tokenizer "$TOKENIZER" \
@@ -71,7 +71,7 @@ run_step "strict K-spec (${LIMIT} cases, K=${SPEC_TOKENS})" \
     --split "$SPLIT" \
     --limit "$LIMIT" \
     --max_new_tokens "$MAX_NEW_TOKENS" \
-    --out "$OUT_DIR/strict_k${SPEC_TOKENS}_${LIMIT}.json"
+    --out "$OUT_DIR/standard_speculative_k${SPEC_TOKENS}_${LIMIT}.json"
 
 run_step "divergence_v2 K-spec (${LIMIT} cases, K=${SPEC_TOKENS})" \
   python k_spec_decode_divergence_eval.py \

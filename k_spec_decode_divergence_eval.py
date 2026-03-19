@@ -8,8 +8,8 @@ This script implements a practical K-token speculative decoding loop:
 
 Modes:
 - baseline: target-only greedy decoding
-- strict: K-token verify, reject falls back to target token
-- divergence_v0: strict + reject override if draft != small_base
+- standard_speculative: K-token verify, reject falls back to target token
+- divergence_v0: standard_speculative + reject override if draft != small_base
 - divergence_v1: v0 + delta_logp > tau_delta
 - divergence_v2: v1 + target_opp < tau_target_opp
 """
@@ -31,6 +31,7 @@ from data_loader import format_prompt, load_medqa
 from evaluator import extract_answer
 from k_spec_kernels import (
     ModelState,
+    advance_state_with_tokens,
     argmax_id,
     find_first_reject_pos,
     get_target_verify_logits,
@@ -42,7 +43,14 @@ from k_spec_kernels import (
 )
 
 
-VALID_MODES = {"baseline", "strict", "divergence_v0", "divergence_v1", "divergence_v2"}
+VALID_MODES = {
+    "baseline",
+    "standard_speculative",
+    "strict",  # backward compatibility alias
+    "divergence_v0",
+    "divergence_v1",
+    "divergence_v2",
+}
 
 
 @dataclass
@@ -143,9 +151,12 @@ def _sync_base_to_generated_len(
         raise ValueError("target_generated_len is smaller than base synced length")
 
     pending = accepted_tokens_all[base_lazy.synced_generated_len : target_generated_len]
-    cur_state = base_lazy.state
-    for token in pending:
-        cur_state = step_state_with_token(base_model, cur_state, token_id=int(token), device=base_device)
+    cur_state = advance_state_with_tokens(
+        base_model,
+        base_lazy.state,
+        token_ids=pending,
+        device=base_device,
+    )
 
     return BaseLazyState(state=cur_state, synced_generated_len=target_generated_len)
 
@@ -204,11 +215,13 @@ def run_case(
 
     t0 = time.perf_counter()
 
+    normalized_mode = "standard_speculative" if mode == "strict" else mode
+
     while len(generated) < max_new_tokens:
         rounds += 1
         k_now = min(speculative_tokens, max_new_tokens - len(generated))
 
-        if mode == "baseline":
+        if normalized_mode == "baseline":
             # baseline 不走 speculative 流程，直接 target greedy。
             accepted_token = argmax_id(target_state.next_logits)
             target_state = step_state_with_token(target, target_state, accepted_token, target_dev)
@@ -267,8 +280,8 @@ def run_case(
             target_logits_reject = target_logits_per_pos[reject_pos]
             target_token = int(argmax_id(target_logits_reject))
 
-            if mode == "strict":
-                # strict：拒绝即回退到 target token
+            if normalized_mode == "standard_speculative":
+                # 标准投机解码：拒绝即回退到 target token
                 chosen = target_token
                 rejected_mismatch += 1
             else:
@@ -300,7 +313,7 @@ def run_case(
                 target_opp = float(logp_target_on_target - logp_target_on_draft)
 
                 do_override, reason = should_override(
-                    mode=mode,
+                    mode=normalized_mode,
                     draft_token_id=draft_token,
                     base_token_id=base_token,
                     delta_logp=delta_logp,
@@ -321,9 +334,8 @@ def run_case(
 
             accepted_round.append(int(chosen))
 
-        for token in accepted_round:
-            target_state = step_state_with_token(target, target_state, token_id=int(token), device=target_dev)
-            draft_state = step_state_with_token(draft, draft_state, token_id=int(token), device=draft_dev)
+        target_state = advance_state_with_tokens(target, target_state, token_ids=accepted_round, device=target_dev)
+        draft_state = advance_state_with_tokens(draft, draft_state, token_ids=accepted_round, device=draft_dev)
 
         generated.extend(int(t) for t in accepted_round)
 
@@ -417,9 +429,11 @@ def main() -> None:
     if args.speculative_tokens < 1:
         raise ValueError("--speculative_tokens must be >= 1")
 
-    if args.mode != "baseline" and not args.draft_model:
+    normalized_mode = "standard_speculative" if args.mode == "strict" else args.mode
+
+    if normalized_mode != "baseline" and not args.draft_model:
         raise ValueError("--draft_model is required for non-baseline modes")
-    if args.mode.startswith("divergence") and not args.small_base_model:
+    if normalized_mode.startswith("divergence") and not args.small_base_model:
         raise ValueError("--small_base_model is required for divergence modes")
 
     tok_path = args.tokenizer or args.target_model
@@ -498,7 +512,8 @@ def main() -> None:
     reject_recheck_overrides = sum(1 for evt in all_rounds if evt.reject_recheck_override)
 
     summary = {
-        "mode": args.mode,
+        "mode": normalized_mode,
+        "mode_input": args.mode,
         "split": args.split,
         "n_cases": n,
         "accuracy": (correct / n) if n else 0.0,
