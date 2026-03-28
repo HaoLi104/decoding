@@ -1,7 +1,7 @@
 # 新Idea实验计划：基于 `draft-small_base` 分歧的拒绝后直接放行策略
 
 ## 1. 背景与目标
-
+我的代码都是通过github在远端的cd /data/ocean/decoding目录下git pull后执行的
 ### 1.1 背景
 在当前投机解码框架中，`target` 负责最终验收，`draft` 负责提案。新想法是引入 `small_base` 作为“是否由领域知识驱动”的参照：
 

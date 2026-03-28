@@ -24,6 +24,9 @@ def _read_summary(path: Path) -> Dict[str, Any]:
         "override_rate": summary.get("override_rate", 0.0),
         "accepted_override": summary.get("accepted_override", 0),
         "override_calls": summary.get("override_calls", 0),
+        "small_base_calls": summary.get("small_base_calls", 0),
+        "small_base_call_rate_per_override_call": summary.get("small_base_call_rate_per_override_call", 0.0),
+        "v2_precheck_skips": summary.get("v2_precheck_skips", 0),
         "tau_delta": summary.get("tau_delta", None),
         "tau_target_opp": summary.get("tau_target_opp", None),
     }
@@ -38,6 +41,9 @@ def _to_markdown(rows: List[Dict[str, Any]]) -> str:
         "override_rate",
         "accepted_override",
         "override_calls",
+        "small_base_calls",
+        "small_base_call_rate_per_override_call",
+        "v2_precheck_skips",
         "tau_delta",
         "tau_target_opp",
     ]

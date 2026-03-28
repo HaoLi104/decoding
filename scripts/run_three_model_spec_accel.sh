@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 300题串行脚本（快速主线实验）
-# 默认顺序：
-# 1) baseline
-# 2) standard_speculative (K-token verify, 无 override)
-# 3) divergence_v2 (K-token + 拒绝点复判)
-# 4) 汇总表 summary.md
+# 一键主线实验：
+# 1) target baseline
+# 2) draft-only baseline
+# 3) standard speculative (K-token, 无三模型复判)
+# 4) divergence_v2 (K-token + 三模型拒绝点复判)
+# 5) 输出核心对比表（accuracy + TPS）
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -33,9 +33,15 @@ TAU_DELTA="${TAU_DELTA:-0.5}"
 TAU_TARGET_OPP="${TAU_TARGET_OPP:-1.0}"
 DISABLE_V2_TARGET_OPP_PRECHECK="${DISABLE_V2_TARGET_OPP_PRECHECK:-0}"
 
-RUN_TAG="${RUN_TAG:-k_spec300}"
-OUT_DIR="${OUT_DIR:-logs/k_spec_divergence/${RUN_TAG}}"
+RUN_TAG="${RUN_TAG:-three_model_spec_accel}"
+OUT_DIR="${OUT_DIR:-logs/three_model_spec/${RUN_TAG}}"
 mkdir -p "$OUT_DIR"
+
+TARGET_BASELINE_OUT="$OUT_DIR/target_baseline_${LIMIT}.json"
+DRAFT_BASELINE_OUT="$OUT_DIR/draft_baseline_${LIMIT}.json"
+STANDARD_OUT="$OUT_DIR/standard_speculative_k${SPEC_TOKENS}_${LIMIT}.json"
+V2_OUT="$OUT_DIR/divergence_v2_k${SPEC_TOKENS}_d${TAU_DELTA//./p}_t${TAU_TARGET_OPP//./p}_${LIMIT}.json"
+SUMMARY_OUT="$OUT_DIR/core_comparison.md"
 
 run_step() {
   local title="$1"
@@ -47,7 +53,7 @@ run_step() {
   "$@"
 }
 
-run_step "baseline (${LIMIT} cases)" \
+run_step "target baseline (${LIMIT} cases)" \
   python k_spec_decode_divergence_eval.py \
     --mode baseline \
     --target_model "$TARGET_MODEL" \
@@ -57,7 +63,19 @@ run_step "baseline (${LIMIT} cases)" \
     --split "$SPLIT" \
     --limit "$LIMIT" \
     --max_new_tokens "$MAX_NEW_TOKENS" \
-    --out "$OUT_DIR/baseline_${LIMIT}.json"
+    --out "$TARGET_BASELINE_OUT"
+
+run_step "draft-only baseline (${LIMIT} cases)" \
+  python k_spec_decode_divergence_eval.py \
+    --mode baseline \
+    --target_model "$DRAFT_MODEL" \
+    --tokenizer "$DRAFT_MODEL" \
+    --target_device_map "$DRAFT_DEVICE_MAP" \
+    --dtype "$DTYPE" \
+    --split "$SPLIT" \
+    --limit "$LIMIT" \
+    --max_new_tokens "$MAX_NEW_TOKENS" \
+    --out "$DRAFT_BASELINE_OUT"
 
 run_step "standard speculative (${LIMIT} cases, K=${SPEC_TOKENS})" \
   python k_spec_decode_divergence_eval.py \
@@ -72,9 +90,9 @@ run_step "standard speculative (${LIMIT} cases, K=${SPEC_TOKENS})" \
     --split "$SPLIT" \
     --limit "$LIMIT" \
     --max_new_tokens "$MAX_NEW_TOKENS" \
-    --out "$OUT_DIR/standard_speculative_k${SPEC_TOKENS}_${LIMIT}.json"
+    --out "$STANDARD_OUT"
 
-run_step "divergence_v2 K-spec (${LIMIT} cases, K=${SPEC_TOKENS})" \
+run_step "divergence_v2 (${LIMIT} cases, K=${SPEC_TOKENS})" \
   python k_spec_decode_divergence_eval.py \
     --mode divergence_v2 \
     --target_model "$TARGET_MODEL" \
@@ -92,14 +110,17 @@ run_step "divergence_v2 K-spec (${LIMIT} cases, K=${SPEC_TOKENS})" \
     --limit "$LIMIT" \
     --max_new_tokens "$MAX_NEW_TOKENS" \
     $( [ "$DISABLE_V2_TARGET_OPP_PRECHECK" = "1" ] && echo "--disable_v2_target_opp_precheck" ) \
-    --out "$OUT_DIR/divergence_v2_k${SPEC_TOKENS}_d${TAU_DELTA//./p}_t${TAU_TARGET_OPP//./p}_${LIMIT}.json"
+    --out "$V2_OUT"
 
-run_step "summary" \
-  python summarize_divergence_results.py \
-    --in_dir "$OUT_DIR" \
-    --out_md "$OUT_DIR/summary.md"
+run_step "core comparison summary" \
+  python summarize_core_comparison.py \
+    --target_baseline "$TARGET_BASELINE_OUT" \
+    --draft_only "$DRAFT_BASELINE_OUT" \
+    --standard_speculative "$STANDARD_OUT" \
+    --divergence_v2 "$V2_OUT" \
+    --out_md "$SUMMARY_OUT"
 
 echo ""
 echo "Done."
 echo "Outputs: $OUT_DIR"
-echo "Summary: $OUT_DIR/summary.md"
+echo "Core summary: $SUMMARY_OUT"

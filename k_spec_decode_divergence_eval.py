@@ -80,6 +80,8 @@ class SampleResult:
     accepted_override: int
     rejected_mismatch: int
     override_calls: int
+    small_base_calls: int
+    v2_precheck_skips: int
     duration_sec: float
     response: str
     round_events: List[RoundEvent]
@@ -175,6 +177,7 @@ def run_case(
     tau_target_opp: float,
     stop_on_eos: bool,
     save_round_level: bool,
+    enable_v2_target_opp_precheck: bool,
 ) -> SampleResult:
     # 核心解码循环：
     # 1) draft 提 K 个 token
@@ -209,6 +212,8 @@ def run_case(
     accepted_override = 0
     rejected_mismatch = 0
     override_calls = 0
+    small_base_calls = 0
+    v2_precheck_skips = 0
     proposed_tokens_total = 0
     rounds = 0
     round_events: List[RoundEvent] = []
@@ -292,35 +297,46 @@ def run_case(
                 reject_recheck_called = True
                 override_calls += 1
 
-                needed_generated_len = len(generated) + reject_pos
-                base_lazy = _sync_base_to_generated_len(
-                    base_model=small_base,
-                    base_lazy=base_lazy,
-                    accepted_tokens_all=generated,
-                    target_generated_len=needed_generated_len,
-                    base_device=base_dev,
-                )
-
-                base_logits_reject = base_lazy.state.next_logits
-                base_token = int(argmax_id(base_logits_reject))
-
-                logp_draft_on_draft = logp_of(draft_logits_per_pos[reject_pos], draft_token)
-                logp_base_on_draft = logp_of(base_logits_reject, draft_token)
-                delta_logp = float(logp_draft_on_draft - logp_base_on_draft)
-
                 logp_target_on_target = logp_of(target_logits_reject, target_token)
                 logp_target_on_draft = logp_of(target_logits_reject, draft_token)
                 target_opp = float(logp_target_on_target - logp_target_on_draft)
 
-                do_override, reason = should_override(
-                    mode=normalized_mode,
-                    draft_token_id=draft_token,
-                    base_token_id=base_token,
-                    delta_logp=delta_logp,
-                    target_opp=target_opp,
-                    tau_delta=tau_delta,
-                    tau_target_opp=tau_target_opp,
-                )
+                # v2 下先做 target 反对度预筛：若 target 明确反对，就不必调用 small_base。
+                if (
+                    normalized_mode == "divergence_v2"
+                    and enable_v2_target_opp_precheck
+                    and target_opp >= tau_target_opp
+                ):
+                    do_override = False
+                    reason = "v2_target_opp_precheck_fail"
+                    v2_precheck_skips += 1
+                else:
+                    needed_generated_len = len(generated) + reject_pos
+                    base_lazy = _sync_base_to_generated_len(
+                        base_model=small_base,
+                        base_lazy=base_lazy,
+                        accepted_tokens_all=generated,
+                        target_generated_len=needed_generated_len,
+                        base_device=base_dev,
+                    )
+                    small_base_calls += 1
+
+                    base_logits_reject = base_lazy.state.next_logits
+                    base_token = int(argmax_id(base_logits_reject))
+
+                    logp_draft_on_draft = logp_of(draft_logits_per_pos[reject_pos], draft_token)
+                    logp_base_on_draft = logp_of(base_logits_reject, draft_token)
+                    delta_logp = float(logp_draft_on_draft - logp_base_on_draft)
+
+                    do_override, reason = should_override(
+                        mode=normalized_mode,
+                        draft_token_id=draft_token,
+                        base_token_id=base_token,
+                        delta_logp=delta_logp,
+                        target_opp=target_opp,
+                        tau_delta=tau_delta,
+                        tau_target_opp=tau_target_opp,
+                    )
 
                 if do_override:
                     # 放行 draft token
@@ -384,6 +400,8 @@ def run_case(
         accepted_override=int(accepted_override),
         rejected_mismatch=int(rejected_mismatch),
         override_calls=int(override_calls),
+        small_base_calls=int(small_base_calls),
+        v2_precheck_skips=int(v2_precheck_skips),
         duration_sec=float(t1 - t0),
         response=response,
         round_events=round_events,
@@ -418,6 +436,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tau_target_opp", type=float, default=1.0)
 
     parser.add_argument("--save_round_level", action="store_true")
+    parser.add_argument(
+        "--disable_v2_target_opp_precheck",
+        action="store_true",
+        help="Disable v2 target opposition precheck before small_base recheck",
+    )
     parser.add_argument("--out", required=True)
     return parser
 
@@ -490,6 +513,7 @@ def main() -> None:
             tau_target_opp=args.tau_target_opp,
             stop_on_eos=args.stop_on_eos,
             save_round_level=args.save_round_level,
+            enable_v2_target_opp_precheck=not args.disable_v2_target_opp_precheck,
         )
         results.append(res)
         if (i + 1) % 20 == 0:
@@ -502,6 +526,8 @@ def main() -> None:
     total_rounds = sum(r.rounds for r in results)
     total_proposed = sum(r.proposed_tokens_total for r in results)
     total_override_calls = sum(r.override_calls for r in results)
+    total_small_base_calls = sum(r.small_base_calls for r in results)
+    total_v2_precheck_skips = sum(r.v2_precheck_skips for r in results)
     total_override = sum(r.accepted_override for r in results)
     total_match = sum(r.accepted_match for r in results)
     total_reject = sum(r.rejected_mismatch for r in results)
@@ -526,6 +552,11 @@ def main() -> None:
         "accepted_override": int(total_override),
         "rejected_mismatch": int(total_reject),
         "override_calls": int(total_override_calls),
+        "small_base_calls": int(total_small_base_calls),
+        "v2_precheck_skips": int(total_v2_precheck_skips),
+        "small_base_call_rate_per_override_call": (
+            total_small_base_calls / total_override_calls
+        ) if total_override_calls else 0.0,
         "override_rate": (total_override / total_override_calls) if total_override_calls else 0.0,
         "accepted_tokens_per_round": (total_tokens / total_rounds) if total_rounds else 0.0,
         # proposal_efficiency 越接近 1 越好：
