@@ -29,26 +29,6 @@
 
 from __future__ import annotations
 
-# region agent log (debug ecc61b)
-import json as _json, time as _time, os as _os, glob as _glob, sys as _sys
-_REMOTE_LOG = "/tmp/debug-ecc61b-remote.log"
-def _dblog(hyp, msg, data):
-    e = {"sessionId":"ecc61b","timestamp":int(_time.time()*1000),
-         "location":"run_benchmark.py:top","hypothesisId":hyp,
-         "message":msg,"data":data,"runId":"bench_diag"}
-    print(f"  [DIAG/{hyp}] {msg}: {_json.dumps(data, ensure_ascii=False)}", flush=True)
-    with open(_REMOTE_LOG,"a") as _f: _f.write(_json.dumps(e)+"\n")
-
-_cwd = _os.getcwd()
-_py_files = sorted(_os.path.basename(p) for p in _glob.glob("/data/ocean/decoding/*.py"))
-_key_modules = {m: _os.path.exists(f"/data/ocean/decoding/{m}.py")
-                for m in ["model_loader_v2","data_loader","evaluator","acceptance","cache_manager"]}
-_dblog("H1", "file_existence_check", {"cwd": _cwd, "key_modules": _key_modules})
-_dblog("H2", "sys_path_sample", {"sys_path_0_3": _sys.path[:3]})
-_dblog("H3", "argv", {"argv": _sys.argv})
-del _json, _time, _os, _glob, _sys, _cwd, _py_files, _key_modules, _REMOTE_LOG, _dblog
-# endregion agent log
-
 import argparse
 import json
 import logging
