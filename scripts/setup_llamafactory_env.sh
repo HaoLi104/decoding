@@ -61,7 +61,13 @@ conda run -n "${LLAMAFACTORY_ENV}" python -m pip install torch torchvision torch
 echo ""
 echo "========== Step 4: 安装 LLaMA-Factory 及训练依赖 =========="
 cd "${LLAMAFACTORY_DIR}"
-conda run -n "${LLAMAFACTORY_ENV}" python -m pip install -e ".[torch,metrics]"
+
+# 先安装 LLaMA-Factory 本体（editable）
+conda run -n "${LLAMAFACTORY_ENV}" python -m pip install -e .
+
+# 再显式补齐训练依赖，避免 pyproject extras 名称变化导致依赖未装全
+conda run -n "${LLAMAFACTORY_ENV}" python -m pip install \
+    transformers datasets accelerate peft trl tyro sentencepiece scipy
 
 echo ""
 echo "========== Step 5: 验证依赖 =========="

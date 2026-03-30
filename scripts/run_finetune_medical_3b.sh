@@ -154,7 +154,11 @@ if ! conda env list | awk '{print $1}' | grep -qx "${LLAMAFACTORY_ENV}"; then
     exit 1
 fi
 
-LF_PY_VERSION="$(conda run -n "${LLAMAFACTORY_ENV}" python -c 'import sys; print(f\"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}\")' 2>/dev/null || true)"
+LF_PY_VERSION="$(
+    conda run -n "${LLAMAFACTORY_ENV}" \
+    python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" \
+    2>/dev/null | tail -n 1 || true
+)"
 echo "  专用环境 Python 版本: ${LF_PY_VERSION}"
 
 if [[ -z "${LF_PY_VERSION}" ]]; then
