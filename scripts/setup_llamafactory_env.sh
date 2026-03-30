@@ -91,11 +91,12 @@ echo "========== Step 2: 升级 pip / setuptools / wheel =========="
 
 echo ""
 echo "========== Step 3: 安装 PyTorch CUDA 依赖 =========="
-# 使用 CUDA 12.4 编译的轮子（cu124），向上兼容 CUDA 12.x 驱动（如服务器的 12.8）。
-# 不使用 pip install torch（无版本锁定），防止装到要求 CUDA > 12.8 的过新版本。
-"${LF_PYTHON}" -m pip install \
-    torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu124
+# 用 conda 的 pytorch 官方通道安装，绕开 pip 版本锁定问题。
+# conda 会根据系统 CUDA 驱动自动选择兼容版本，比 pip --index-url 更可靠。
+# 注意：此处直接调用 conda install -n，不经过 pyenv shim，无 conda run 问题。
+conda install -n "${LLAMAFACTORY_ENV}" \
+    pytorch torchvision torchaudio pytorch-cuda=12.4 \
+    -c pytorch -c nvidia -y
 
 echo ""
 echo "========== Step 4: 安装 LLaMA-Factory 及训练依赖 =========="
@@ -112,12 +113,18 @@ echo ""
 echo "========== Step 5: 验证依赖 =========="
 "${LF_PYTHON}" - <<'EOF'
 import sys
+import torch
 import peft
 import trl
 import tyro
 import llamafactory
 
 print("python:", sys.version)
+print("torch:", torch.__version__)
+print("cuda available:", torch.cuda.is_available())
+print("cuda device count:", torch.cuda.device_count())
+if torch.cuda.is_available():
+    print("cuda bf16 supported:", torch.cuda.is_bf16_supported())
 print("peft:", peft.__version__)
 print("trl:", trl.__version__)
 print("tyro:", tyro.__version__)
