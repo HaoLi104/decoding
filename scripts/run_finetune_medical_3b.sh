@@ -190,6 +190,61 @@ if ! "${LF_PYTHON}" -c "import peft,trl,tyro,llamafactory" >/dev/null 2>&1; then
 fi
 echo "  ✓ 专用环境检查通过（Python ${LF_PY_VERSION}）"
 
+# region agent log (debug ecc61b)
+echo ""
+echo "---- [DEBUG ecc61b] CUDA/Torch 诊断 ----"
+"${LF_PYTHON}" - <<'PYEOF'
+import json, time, os, glob
+from pathlib import Path
+
+REMOTE_LOG = Path("/tmp/debug-ecc61b-remote.log")
+
+def log(hyp, msg, data):
+    e = {"sessionId":"ecc61b","timestamp":int(time.time()*1000),
+         "location":"run_finetune:step2.5","hypothesisId":hyp,
+         "message":msg,"data":data,"runId":"run_diag"}
+    print(f"  [DIAG/{hyp}] {msg}: {json.dumps(data, ensure_ascii=False)}")
+    with open(REMOTE_LOG, "a") as f:
+        f.write(json.dumps(e)+"\n")
+
+# H1+H2: torch 版本、CUDA 编译目标、安装时间
+try:
+    import torch, importlib.util
+    spec = importlib.util.find_spec("torch")
+    mtime = os.path.getmtime(spec.origin) if spec else None
+    log("H1-H2", "torch_info", {
+        "version": torch.__version__,
+        "cuda_built_for": torch.version.cuda,
+        "install_mtime": time.ctime(mtime) if mtime else "unknown"
+    })
+except Exception as e:
+    log("H1-H2", "torch_import_error", {"err": str(e)})
+
+# H1+H3: torchaudio 版本及导入结果
+try:
+    import torchaudio
+    log("H1-H3", "torchaudio_ok", {"version": torchaudio.__version__})
+except ImportError as e:
+    log("H1-H3", "torchaudio_import_error", {"err": str(e)})
+
+# H4+H5: 服务器上实际存在的 libcudart 文件
+patterns = [
+    "/usr/local/cuda*/lib64/libcudart.so*",
+    "/usr/lib/x86_64-linux-gnu/libcudart.so*",
+    "/usr/local/lib/libcudart.so*",
+]
+found = []
+for p in patterns:
+    found.extend(glob.glob(p))
+log("H4-H5", "libcudart_scan", {"found": found})
+
+# H4: LD_LIBRARY_PATH
+log("H4", "ld_library_path", {"LD_LIBRARY_PATH": os.environ.get("LD_LIBRARY_PATH", "NOT_SET")})
+PYEOF
+echo "---- [DEBUG ecc61b END] ----"
+echo ""
+# endregion agent log
+
 # =============================================================================
 # Step 3：启动 LLaMA-Factory 单卡全参微调
 # =============================================================================

@@ -91,12 +91,13 @@ echo "========== Step 2: 升级 pip / setuptools / wheel =========="
 
 echo ""
 echo "========== Step 3: 安装 PyTorch CUDA 依赖 =========="
-# 用 conda 的 pytorch 官方通道安装，绕开 pip 版本锁定问题。
-# conda 会根据系统 CUDA 驱动自动选择兼容版本，比 pip --index-url 更可靠。
-# 注意：此处直接调用 conda install -n，不经过 pyenv shim，无 conda run 问题。
-conda install -n "${LLAMAFACTORY_ENV}" \
-    pytorch torchvision torchaudio pytorch-cuda=12.4 \
-    -c pytorch -c nvidia -y
+# 锁定 torch/torchvision/torchaudio 到 2.5.1，使用 cu124（CUDA 12.4 编译轮子）。
+# cu124 轮子链接 libcudart.so.12，向上兼容服务器 CUDA 12.8 驱动。
+# 不使用 pip install torch（无版本锁定），防止解析到依赖 libcudart.so.13 的过新版本。
+# 不使用 conda install pytorch-cuda=12.4：conda 可能把 torchaudio 解析到 CUDA 13 包。
+"${LF_PYTHON}" -m pip install \
+    "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1" \
+    --index-url https://download.pytorch.org/whl/cu124
 
 echo ""
 echo "========== Step 4: 安装 LLaMA-Factory 及训练依赖 =========="
