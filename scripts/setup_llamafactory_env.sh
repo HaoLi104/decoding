@@ -7,6 +7,10 @@
 #   - 满足 LLaMA-Factory 对 Python >= 3.11 的要求
 #   - 安装 peft / trl / tyro / llamafactory 等训练依赖
 #
+# 核心设计：
+#   环境内所有 Python 调用均使用 conda 环境的**绝对路径**，
+#   完全绕开 pyenv shim 对 "python" 命令名的拦截。
+#
 # 用法：
 #   cd /data/ocean/decoding
 #   conda activate kvner
@@ -49,29 +53,61 @@ else
     conda create -n "${LLAMAFACTORY_ENV}" python=3.11 -y
 fi
 
+# ---- 解析 conda 环境的绝对 Python 路径，绕开 pyenv shim ----
+# CONDA_PREFIX 指向当前激活的环境（kvner），由此推导 envs 根目录。
+CONDA_ENVS_DIR="$(dirname "${CONDA_PREFIX:-}")"
+
+LF_PYTHON=""
+for CANDIDATE in \
+    "${CONDA_ENVS_DIR}/${LLAMAFACTORY_ENV}/bin/python3" \
+    "${CONDA_ENVS_DIR}/${LLAMAFACTORY_ENV}/bin/python" \
+    "/opt/conda/envs/${LLAMAFACTORY_ENV}/bin/python3" \
+    "/opt/conda/envs/${LLAMAFACTORY_ENV}/bin/python" \
+    "${HOME}/.conda/envs/${LLAMAFACTORY_ENV}/bin/python3" \
+    "${HOME}/.conda/envs/${LLAMAFACTORY_ENV}/bin/python"
+do
+    if [[ -x "${CANDIDATE}" ]]; then
+        LF_PYTHON="${CANDIDATE}"
+        break
+    fi
+done
+
+if [[ -z "${LF_PYTHON}" ]]; then
+    echo "[ERROR] 创建环境后仍无法找到 Python 可执行文件："
+    for P in "${CONDA_ENVS_DIR}/${LLAMAFACTORY_ENV}/bin/python3" \
+             "${HOME}/.conda/envs/${LLAMAFACTORY_ENV}/bin/python3"; do
+        echo "  尝试路径: ${P} → 不存在"
+    done
+    echo "请检查 conda 安装目录后重试。"
+    exit 1
+fi
+
+echo "  Python 绝对路径: ${LF_PYTHON}"
+echo "  Python 版本: $("${LF_PYTHON}" --version 2>&1)"
+
 echo ""
 echo "========== Step 2: 升级 pip / setuptools / wheel =========="
-conda run -n "${LLAMAFACTORY_ENV}" python -m pip install --upgrade pip setuptools wheel
+"${LF_PYTHON}" -m pip install --upgrade pip setuptools wheel
 
 echo ""
 echo "========== Step 3: 安装 PyTorch CUDA 依赖 =========="
 # 如远端已安装 torch，可按需跳过；这里显式安装以保证环境自洽。
-conda run -n "${LLAMAFACTORY_ENV}" python -m pip install torch torchvision torchaudio
+"${LF_PYTHON}" -m pip install torch torchvision torchaudio
 
 echo ""
 echo "========== Step 4: 安装 LLaMA-Factory 及训练依赖 =========="
 cd "${LLAMAFACTORY_DIR}"
 
 # 先安装 LLaMA-Factory 本体（editable）
-conda run -n "${LLAMAFACTORY_ENV}" python -m pip install -e .
+"${LF_PYTHON}" -m pip install -e .
 
 # 再显式补齐训练依赖，避免 pyproject extras 名称变化导致依赖未装全
-conda run -n "${LLAMAFACTORY_ENV}" python -m pip install \
+"${LF_PYTHON}" -m pip install \
     transformers datasets accelerate peft trl tyro sentencepiece scipy
 
 echo ""
 echo "========== Step 5: 验证依赖 =========="
-conda run -n "${LLAMAFACTORY_ENV}" python - <<'EOF'
+"${LF_PYTHON}" - <<'EOF'
 import sys
 import peft
 import trl

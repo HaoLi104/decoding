@@ -12,15 +12,16 @@
 # 用法（远端 H200 机器）：
 #   cd /data/ocean/decoding
 #   conda activate kvner
+#   export CUDA_VISIBLE_DEVICES=1
 #   bash scripts/run_finetune_medical_3b.sh
 #
 # 如只重跑微调（数据已准备好）：
 #   bash scripts/run_finetune_medical_3b.sh --skip_data_prep
 #
 # 说明：
-#   - 数据准备阶段沿用当前环境（通常是 kvner）
-#   - LLaMA-Factory 训练阶段强制使用 Python 3.11 专用环境
-#   - 默认专用环境名：llamafactory311
+#   - 数据准备阶段沿用当前环境（kvner）
+#   - LLaMA-Factory 训练阶段使用专用 Python 3.11 环境的绝对路径，
+#     完全绕开 pyenv shim 和 conda run 的干扰
 # =============================================================================
 
 set -euo pipefail
@@ -107,12 +108,10 @@ if info_path.exists():
 else:
     info = {}
 
-# 注册训练集
 info["medical_mix_train"] = {
     "file_name": "${DATA_DIR}/medical_mix_train.json",
     "formatting": "alpaca"
 }
-# 注册验证集（供手动评估使用）
 info["medical_mix_val"] = {
     "file_name": "${DATA_DIR}/medical_mix_val.json",
     "formatting": "alpaca"
@@ -126,65 +125,70 @@ print(f"    注册条目: medical_mix_train, medical_mix_val")
 EOF
 
 # =============================================================================
-# Step 2.5：检查 LLaMA-Factory Python 3.11 专用环境
+# Step 2.5：定位 LLaMA-Factory 专用环境的 Python 绝对路径
+#
+# 核心设计：pyenv shim 会拦截所有通过命令名 "python" 发起的调用（包括
+# conda run 内部），导致 llamafactory311 的 Python 永远无法被正确解析。
+# 解决方案：直接使用 conda 环境目录下 Python 二进制的绝对路径，完全绕开
+# pyenv 的 PATH shim 机制。
 # =============================================================================
 echo ""
-echo "========== Step 2.5: 检查 LLaMA-Factory 专用环境 =========="
+echo "========== Step 2.5: 定位专用环境 Python =========="
 echo "  目标环境名: ${LLAMAFACTORY_ENV}"
 
-if ! command -v conda >/dev/null 2>&1; then
-    echo "[ERROR] 当前 shell 找不到 conda 命令。"
-    echo "请先在远端执行 conda 初始化后再运行本脚本。"
-    exit 1
-fi
+# 从当前激活 conda 环境的路径推导 envs 根目录
+# CONDA_PREFIX 通常为 /home/<user>/.conda/envs/<current_env>
+# 或 /opt/conda/envs/<current_env>
+CONDA_ENVS_DIR="$(dirname "${CONDA_PREFIX:-}")"
 
-if ! conda env list | awk '{print $1}' | grep -qx "${LLAMAFACTORY_ENV}"; then
-    echo "[ERROR] 未找到专用环境: ${LLAMAFACTORY_ENV}"
+# 尝试常见的 Python 二进制位置
+LF_PYTHON=""
+for CANDIDATE in \
+    "${CONDA_ENVS_DIR}/${LLAMAFACTORY_ENV}/bin/python3" \
+    "${CONDA_ENVS_DIR}/${LLAMAFACTORY_ENV}/bin/python" \
+    "/opt/conda/envs/${LLAMAFACTORY_ENV}/bin/python3" \
+    "/opt/conda/envs/${LLAMAFACTORY_ENV}/bin/python" \
+    "${HOME}/.conda/envs/${LLAMAFACTORY_ENV}/bin/python3" \
+    "${HOME}/.conda/envs/${LLAMAFACTORY_ENV}/bin/python"
+do
+    if [[ -x "${CANDIDATE}" ]]; then
+        LF_PYTHON="${CANDIDATE}"
+        break
+    fi
+done
+
+if [[ -z "${LF_PYTHON}" ]]; then
+    echo "[ERROR] 无法找到 ${LLAMAFACTORY_ENV} 的 Python 可执行文件。"
     echo ""
-    echo "请先执行以下命令创建环境："
-    echo "  cd ${WORK_DIR}"
-    echo "  conda activate kvner"
+    echo "请先执行："
     echo "  bash scripts/setup_llamafactory_env.sh"
     echo ""
-    echo "然后重新运行："
-    echo "  cd ${WORK_DIR}"
-    echo "  conda activate kvner"
-    echo "  export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-    echo "  bash scripts/run_finetune_medical_3b.sh --skip_data_prep"
+    echo "或手动检查路径："
+    echo "  conda env list"
     exit 1
 fi
 
-LF_PY_VERSION="$(
-    conda run -n "${LLAMAFACTORY_ENV}" \
-    python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}')" \
-    2>/dev/null | tail -n 1 || true
-)"
-echo "  专用环境 Python 版本: ${LF_PY_VERSION}"
+echo "  Python 绝对路径: ${LF_PYTHON}"
 
-if [[ -z "${LF_PY_VERSION}" ]]; then
-    echo "[ERROR] 无法在 ${LLAMAFACTORY_ENV} 中启动 python。"
-    echo "请重新执行：bash scripts/setup_llamafactory_env.sh"
-    exit 1
-fi
+# 验证版本
+LF_PY_VERSION="$("${LF_PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")' 2>/dev/null || true)"
+echo "  Python 版本: ${LF_PY_VERSION}"
 
 LF_PY_MAJOR="$(echo "${LF_PY_VERSION}" | cut -d. -f1)"
 LF_PY_MINOR="$(echo "${LF_PY_VERSION}" | cut -d. -f2)"
-if [[ "${LF_PY_MAJOR}" -lt 3 ]] || [[ "${LF_PY_MAJOR}" -eq 3 && "${LF_PY_MINOR}" -lt 11 ]]; then
-    echo "[ERROR] ${LLAMAFACTORY_ENV} 的 Python 版本过低：${LF_PY_VERSION}"
-    echo "LLaMA-Factory 当前要求 Python >= 3.11"
+if [[ "${LF_PY_MAJOR:-0}" -lt 3 ]] || [[ "${LF_PY_MAJOR:-0}" -eq 3 && "${LF_PY_MINOR:-0}" -lt 11 ]]; then
+    echo "[ERROR] Python 版本过低（${LF_PY_VERSION}），LLaMA-Factory 需要 >= 3.11"
     echo "请重新执行：bash scripts/setup_llamafactory_env.sh"
     exit 1
 fi
 
-if ! conda run -n "${LLAMAFACTORY_ENV}" python -c "import peft,trl,tyro,llamafactory" >/dev/null 2>&1; then
-    echo "[ERROR] ${LLAMAFACTORY_ENV} 中缺少 LLaMA-Factory 依赖（peft / trl / tyro / llamafactory）"
-    echo "请执行："
-    echo "  cd ${WORK_DIR}"
-    echo "  conda activate kvner"
-    echo "  bash scripts/setup_llamafactory_env.sh"
+# 验证关键依赖
+if ! "${LF_PYTHON}" -c "import peft,trl,tyro,llamafactory" >/dev/null 2>&1; then
+    echo "[ERROR] 缺少训练依赖（peft / trl / tyro / llamafactory）"
+    echo "请执行：bash scripts/setup_llamafactory_env.sh"
     exit 1
 fi
-echo "  ✓ 专用环境检查通过"
+echo "  ✓ 专用环境检查通过（Python ${LF_PY_VERSION}）"
 
 # =============================================================================
 # Step 3：启动 LLaMA-Factory 单卡全参微调
@@ -194,33 +198,17 @@ echo "========== Step 3: 启动全参微调（单卡 H200，bfloat16）=========
 echo "  Base 模型:  ${MODEL_BASE}"
 echo "  输出路径:   ${MODEL_OUTPUT}"
 echo "  配置文件:   ${TRAIN_YAML}"
-echo "  训练环境:   ${LLAMAFACTORY_ENV}"
+echo "  训练 Python: ${LF_PYTHON}"
+echo "  CUDA 设备:  ${CUDA_VISIBLE_DEVICES}"
 echo ""
-
-# region agent log
-echo "---- [DIAG ecc61b] 训练环境诊断 ----"
-echo "[DIAG-H1] current-shell which python: $(which python)"
-echo "[DIAG-H1] current-shell python --version: $(python --version 2>&1)"
-echo "[DIAG-H1] which llamafactory-cli: $(which llamafactory-cli 2>/dev/null || echo NOT_FOUND)"
-echo "[DIAG-H2] CONDA_PREFIX: ${CONDA_PREFIX:-NOT_SET}"
-echo "[DIAG-H2] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
-echo "[DIAG-H3] ${LLAMAFACTORY_ENV} python --version: $(conda run -n "${LLAMAFACTORY_ENV}" python --version 2>&1)"
-echo "[DIAG-H3] ${LLAMAFACTORY_ENV} trl: $(conda run -n "${LLAMAFACTORY_ENV}" python -c 'import trl; print(trl.__version__)' 2>&1)"
-echo "[DIAG-H3] ${LLAMAFACTORY_ENV} tyro: $(conda run -n "${LLAMAFACTORY_ENV}" python -c 'import tyro; print(tyro.__version__)' 2>&1)"
-echo "[DIAG-H4] train entry exists: $(test -f "${LLAMAFACTORY_DIR}/src/train.py" && echo YES || echo NO)"
-echo "---- [DIAG ecc61b END] ----"
-echo ""
-# endregion
 
 cd "${LLAMAFACTORY_DIR}"
 
-# 使用 Python 3.11 专用环境调用训练入口，避免：
-# 1) 命中 /opt/anaconda3/bin/llamafactory-cli 的 Python 3.13 shebang
-# 2) 使用 kvner 中不满足要求的 Python 3.10
-conda run -n "${LLAMAFACTORY_ENV}" python src/train.py "${TRAIN_YAML}" \
+# 使用绝对路径直接调用，完全绕开 pyenv shim 和 conda run
+"${LF_PYTHON}" src/train.py "${TRAIN_YAML}" \
     2>&1 | tee "${LOG_DIR}/train.log"
 
-TRAIN_EXIT=$?
+TRAIN_EXIT=${PIPESTATUS[0]}
 if [[ ${TRAIN_EXIT} -ne 0 ]]; then
     echo "[ERROR] 训练失败，退出码: ${TRAIN_EXIT}，请查看日志: ${LOG_DIR}/train.log"
     exit ${TRAIN_EXIT}
@@ -242,11 +230,7 @@ echo "# 查看最终 checkpoint："
 echo "  ls -lh ${MODEL_OUTPUT}/"
 echo ""
 echo "# 快速推理验证（确认 Chat Template 未破坏）："
-echo "  cd ${WORK_DIR}"
-echo "  conda activate kvner"
-cat << 'PYEOF'
-  python verify_medical_draft.py
-PYEOF
+echo "  cd ${WORK_DIR} && conda activate kvner && python verify_medical_draft.py"
 
 echo ""
 echo "========== 全流程完成 =========="
