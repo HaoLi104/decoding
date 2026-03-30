@@ -8,6 +8,7 @@
 - 默认开发模式：本地编辑代码，远端机器执行重型模型加载与评测。
 - 远端工作目录绝对路径：`/data/ocean/decoding`
 - 远端 Python 环境：`conda activate kvner`
+- LLaMA-Factory 微调专用环境：`conda run -n llamafactory311 ...`（原因：当前 LLaMA-Factory 要求 Python >= 3.11，而 `kvner` 可能仍是 Python 3.10）
 - 提供远端命令时，必须按以下标准顺序组织：
   1) `cd /data/ocean/decoding`
   2) `conda activate kvner`
@@ -34,6 +35,9 @@
 
 # Git 同步规范（本地 <-> 远端）
 - 建议本地代码改动后的同步流：`git add` -> `git commit` -> `git push`。
+- 每次涉及本地同步、提交、部分文件上传时，必须给出**清晰且可直接执行的文件级 `git add` 命令**，优先显式列出路径，例如：`git add config_v2.py cache_manager.py scripts/run_finetune_medical_3b.sh`。
+- **禁止默认建议 `git add .`**，除非用户明确要求全量提交；默认采用“白名单式提交”策略，只暂存本次需要同步的文件。
+- 如果改动较多，先给 `git status` 检查，再按“核心代码 / 配置 / 脚本 / 文档”分组给出多条 `git add` 命令，帮助用户逐组确认。
 - 建议远端运行实验前的同步流：优先执行 `git pull`。
 - 除非用户明确要求，绝对不主动执行 `push`、修改历史或 `force` 操作。
 - 遇到冲突时，禁止使用危险命令（如 `git reset --hard`），必须先提供安全的解决方案。
