@@ -39,7 +39,9 @@ for arg in "$@"; do
 done
 
 # ---- 单卡绑定 ---------------------------------------------------------------
-export CUDA_VISIBLE_DEVICES=0
+# 如果用户已在外部显式设置 CUDA_VISIBLE_DEVICES，则尊重用户设置；
+# 否则默认绑定到 0 号卡。
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 mkdir -p "${LOG_DIR}"
 echo "[$(date '+%H:%M:%S')] 日志目录: ${LOG_DIR}"
@@ -127,10 +129,25 @@ echo "  输出路径:   ${MODEL_OUTPUT}"
 echo "  配置文件:   ${TRAIN_YAML}"
 echo ""
 
+# region agent log
+echo "---- [DIAG ecc61b] 训练环境诊断 ----"
+echo "[DIAG-H1] which python: $(which python)"
+echo "[DIAG-H1] python --version: $(python --version 2>&1)"
+echo "[DIAG-H1] which llamafactory-cli: $(which llamafactory-cli 2>/dev/null || echo NOT_FOUND)"
+echo "[DIAG-H2] CONDA_PREFIX: ${CONDA_PREFIX:-NOT_SET}"
+echo "[DIAG-H2] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
+echo "[DIAG-H3] python -c import trl: $(python -c 'import trl; print(trl.__version__)' 2>&1)"
+echo "[DIAG-H3] python -c import tyro: $(python -c 'import tyro; print(tyro.__version__)' 2>&1)"
+echo "[DIAG-H4] train entry exists: $(test -f "${LLAMAFACTORY_DIR}/src/train.py" && echo YES || echo NO)"
+echo "---- [DIAG ecc61b END] ----"
+echo ""
+# endregion
+
 cd "${LLAMAFACTORY_DIR}"
 
-# llamafactory-cli train 读取 YAML 配置启动训练
-llamafactory-cli train "${TRAIN_YAML}" \
+# 直接使用当前 conda 环境的 python 调用训练入口，避免命中
+# /opt/anaconda3/bin/llamafactory-cli 的 Python 3.13 shebang。
+python src/train.py "${TRAIN_YAML}" \
     2>&1 | tee "${LOG_DIR}/train.log"
 
 TRAIN_EXIT=$?
