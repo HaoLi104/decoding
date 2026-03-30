@@ -95,9 +95,11 @@ echo "========== Step 3: 安装 PyTorch CUDA 依赖 =========="
 # cu124 轮子链接 libcudart.so.12，向上兼容服务器 CUDA 12.8 驱动。
 # 不使用 pip install torch（无版本锁定），防止解析到依赖 libcudart.so.13 的过新版本。
 # 不使用 conda install pytorch-cuda=12.4：conda 可能把 torchaudio 解析到 CUDA 13 包。
+# --force-reinstall 强制覆盖 conda 可能安装的 CUDA 13 版 torchaudio
 "${LF_PYTHON}" -m pip install \
     "torch==2.5.1" "torchvision==0.20.1" "torchaudio==2.5.1" \
-    --index-url https://download.pytorch.org/whl/cu124
+    --index-url https://download.pytorch.org/whl/cu124 \
+    --force-reinstall
 
 echo ""
 echo "========== Step 4: 安装 LLaMA-Factory 及训练依赖 =========="
