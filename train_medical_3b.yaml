@@ -46,9 +46,9 @@ max_grad_norm: 1.0
 per_device_train_batch_size: 8
 per_device_eval_batch_size: 8
 gradient_accumulation_steps: 4   # 全局 batch = 1卡 × 8 × 4 = 32
-pure_bf16: true                   # 全程 bfloat16，与推理阶段精度一致
+bf16: true                        # 全程 bfloat16（HF Trainer 标准标志，不做 pre-flight 设备检测）
 gradient_checkpointing: false     # H200 显存充裕，关闭以加速（3B 模型不需要）
-flash_attn: fa2                   # Hopper 架构支持 FA2，显著加速
+flash_attn: auto                  # auto 模式：有 flash-attn 则开启，否则静默 fallback
 
 
 ### --- 5. 保存与日志 --- ###

@@ -91,8 +91,11 @@ echo "========== Step 2: 升级 pip / setuptools / wheel =========="
 
 echo ""
 echo "========== Step 3: 安装 PyTorch CUDA 依赖 =========="
-# 如远端已安装 torch，可按需跳过；这里显式安装以保证环境自洽。
-"${LF_PYTHON}" -m pip install torch torchvision torchaudio
+# 使用 CUDA 12.4 编译的轮子（cu124），向上兼容 CUDA 12.x 驱动（如服务器的 12.8）。
+# 不使用 pip install torch（无版本锁定），防止装到要求 CUDA > 12.8 的过新版本。
+"${LF_PYTHON}" -m pip install \
+    torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu124
 
 echo ""
 echo "========== Step 4: 安装 LLaMA-Factory 及训练依赖 =========="
