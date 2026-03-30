@@ -1,0 +1,67 @@
+### ==========================================================================
+### LLaMA-Factory 微调配置 — Qwen2.5-3B-Instruct → Qwen2.5-3B-Instruct-Medical
+###
+### 实验计划要求（Section 3）：
+###   - 全参数微调（FFT），禁止 LoRA
+###   - 学习率 < 1e-5
+###   - 训练 1-2 Epochs
+###   - 绝不改变原生 Chat Template（qwen）
+###   - 确保 ΔP 纯粹反映「知识差」而非「格式差」
+###
+### 运行方式见 scripts/run_finetune_medical_3b.sh
+### ==========================================================================
+
+
+### --- 1. 模型设置 --- ###
+model_name_or_path: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct
+trust_remote_code: true
+stage: sft
+do_train: true
+finetuning_type: full          # 全参数微调（FFT），禁止使用 lora / qlora
+
+
+### --- 2. 数据集设置 --- ###
+# 需在 LLaMA-Factory/data/dataset_info.json 中注册 medical_mix_train
+# 注册方式见 prepare_finetune_data.py 输出的提示
+dataset: medical_mix_train
+template: qwen                 # Qwen2.5 使用 qwen 模板（<|im_start|> Chat Template），必须与 Base 一致
+cutoff_len: 2048               # MedQA 题目较短，2048 足够；减少显存占用
+val_size: 0.0                  # 验证集已在 prepare_finetune_data.py 中独立拆分
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+
+### --- 3. 训练核心参数 --- ###
+# 实验计划要求 lr < 1e-5；使用 5e-6 保守值，防止灾难性遗忘
+learning_rate: 5.0e-6
+num_train_epochs: 2            # 1-2 Epochs（先跑 2 epoch，观察验证集 loss 决定是否早停）
+lr_scheduler_type: cosine
+warmup_ratio: 0.05             # 5% warmup，避免初始大梯度破坏预训练权重
+weight_decay: 0.01             # 轻微 L2 正则，防止全参微调过拟合
+max_grad_norm: 1.0
+
+
+### --- 4. 单卡 H200 批次设置 --- ###
+# Qwen2.5-3B bfloat16 全参约占 6GB，H200 141GB 显存非常充裕
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 4   # 全局 batch = 1卡 × 8 × 4 = 32
+pure_bf16: true                   # 全程 bfloat16，与推理阶段精度一致
+gradient_checkpointing: false     # H200 显存充裕，关闭以加速（3B 模型不需要）
+flash_attn: fa2                   # Hopper 架构支持 FA2，显著加速
+
+
+### --- 5. 保存与日志 --- ###
+output_dir: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Medical
+logging_steps: 20
+save_strategy: epoch             # 每个 epoch 保存一次
+save_total_limit: 2              # 只保留最近 2 个 checkpoint
+plot_loss: true
+report_to: none                  # 不上报到 wandb/tensorboard（可改为 tensorboard）
+
+
+### --- 6. 评估（使用独立验证集文件，非训练集分割）--- ###
+# 如需在训练中评估，可追加：
+# eval_dataset: medical_mix_val
+# eval_strategy: steps
+# eval_steps: 200
