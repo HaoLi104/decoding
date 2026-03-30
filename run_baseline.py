@@ -128,7 +128,9 @@ def evaluate(
     results      = []
 
     for start in tqdm(range(0, len(dataset), batch_size), desc="评测"):
-        batch_items = list(dataset[start : start + batch_size])  # HF Dataset slice
+        # HF Dataset 切片返回列字典，需按行索引取出 dict 列表
+        end = min(start + batch_size, len(dataset))
+        batch_items = [dataset[i] for i in range(start, end)]
 
         prompts = [build_prompt(item, tokenizer) for item in batch_items]
         enc = tokenizer(
