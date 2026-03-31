@@ -193,17 +193,10 @@ class TriModelOrchestrator:
         prompt_len = prompt_ids.shape[1]
         self._prompt_len = prompt_len
 
-        # --- Step 1: Base/Draft 共享 Prefill ---
-        # 由于两者架构完全相同（Qwen2.5-3B），共用一次 forward 填充 shared_cache
-        # 注意：此处只用 draft_model forward，base_model 后续通过 fork 获得相同 KV
-        logger.debug("Base/Draft 共享 Prefill  prompt_len=%d", prompt_len)
-        shared_logits = prefill(
-            model=self._draft_model,
-            input_ids=prompt_ids,
-            cache=self._cache_mgr.shared_cache,
-        )  # shape: [1, vocab_size]
+        # 三模型各自独立 Prefill（无 deepcopy，每模型一次 forward）
+        # 去掉了"shared_prefill + fork"方案，因为 deepcopy 会通过 config
+        # 引用触发整个模型参数拷贝，造成每轮 proposal 卡死 30 分钟以上
 
-        # --- Step 2: Target 独立 Prefill ---
         logger.debug("Target 独立 Prefill  prompt_len=%d", prompt_len)
         target_logits = prefill(
             model=self._target_model,
@@ -211,10 +204,20 @@ class TriModelOrchestrator:
             cache=self._cache_mgr.target_cache,
         )  # shape: [1, vocab_size]
 
-        # --- Step 3: CoW 分叉 shared_cache → draft_cache + base_cache ---
-        draft_cache, base_cache = self._cache_mgr.fork_caches()
+        logger.debug("Draft 独立 Prefill  prompt_len=%d", prompt_len)
+        draft_logits = prefill(
+            model=self._draft_model,
+            input_ids=prompt_ids,
+            cache=self._cache_mgr.draft_cache,
+        )  # shape: [1, vocab_size]
 
-        # --- Step 4: 构建三个 ModelContext ---
+        logger.debug("Base 独立 Prefill  prompt_len=%d", prompt_len)
+        base_logits = prefill(
+            model=self._base_model,
+            input_ids=prompt_ids,
+            cache=self._cache_mgr.base_cache,
+        )  # shape: [1, vocab_size]
+
         self._target_ctx = ModelContext(
             model=self._target_model,
             cache=self._cache_mgr.target_cache,
@@ -224,19 +227,19 @@ class TriModelOrchestrator:
         )
         self._draft_ctx = ModelContext(
             model=self._draft_model,
-            cache=draft_cache,
+            cache=self._cache_mgr.draft_cache,
             seq_len=prompt_len,
-            last_logits=shared_logits.clone(),
+            last_logits=draft_logits,
             device=self._device,
         )
         self._base_ctx = ModelContext(
             model=self._base_model,
-            cache=base_cache,
+            cache=self._cache_mgr.base_cache,
             seq_len=prompt_len,
-            last_logits=shared_logits.clone(),
+            last_logits=base_logits,
             device=self._device,
         )
-        logger.debug("三模型 Prefill 完成，各 ModelContext 初始化")
+        logger.debug("三模型独立 Prefill 完成，各 ModelContext 初始化")
 
     # ------------------------------------------------------------------
     # 接受后同步

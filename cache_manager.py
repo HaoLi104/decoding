@@ -17,9 +17,8 @@ KV Cache 管理器 — StaticCache 预分配 + Base/Draft 前缀共享 + Copy-on
 
 from __future__ import annotations
 
-import copy
 import logging
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from transformers import PretrainedConfig
@@ -46,63 +45,48 @@ def _make_static_cache(
     return cache
 
 
-def _clone_static_cache(src: StaticCache) -> StaticCache:
-    """CoW 深拷贝：复制 StaticCache 中所有 KV 张量的数据。
-
-    StaticCache 内部以 key_cache / value_cache 列表形式存储每层的 KV Tensor。
-    此函数对每层 KV Tensor 执行 .clone()，实现物理独立的写时复制。
-
-    Returns:
-        与 src 等配置但 KV 数据完全独立的新 StaticCache 实例。
-    """
-    # 直接对整个对象做深拷贝（含 config 引用和 buffer Tensor）
-    dst = copy.deepcopy(src)
-    return dst
-
-
 class PrefixSharedCacheManager:
-    """Base 与 Draft 的 StaticCache 前缀共享与写时复制管理器。
+    """三模型 StaticCache 独立分配管理器。
+
+    每个模型（Target / Draft / Base）拥有独立的 StaticCache，
+    在 allocate() 时一次性预分配，避免 deepcopy 带来的巨大开销。
 
     属性（只读 property）：
         target_cache:  Target(32B) 的独立 StaticCache
-        shared_cache:  Prefill 阶段 Base/Draft 共用的 StaticCache
-        draft_cache:   CoW 分叉后 Draft 独立的 StaticCache（fork 前为 None）
-        base_cache:    CoW 分叉后 Base 独立的 StaticCache（fork 前为 None）
+        draft_cache:   Draft(3B-Medical) 的独立 StaticCache
+        base_cache:    Base(3B) 的独立 StaticCache
     """
 
     def __init__(
         self,
         target_config: PretrainedConfig,
-        small_config:  PretrainedConfig,   # Base/Draft 共享同一架构配置
+        small_config:  PretrainedConfig,   # Draft 和 Base 共享同一架构配置（3B 相同）
         max_batch_size: int,
         max_cache_len:  int,
         device:  torch.device,
         dtype:   torch.dtype,
     ) -> None:
-        self._target_config = target_config
-        self._small_config  = small_config
+        self._target_config  = target_config
+        self._small_config   = small_config
         self._max_batch_size = max_batch_size
         self._max_cache_len  = max_cache_len
         self._device = device
         self._dtype  = dtype
 
         # 内部 cache 引用（allocate() 后初始化）
-        self._target_cache:  Optional[StaticCache] = None
-        self._shared_cache:  Optional[StaticCache] = None
-        self._draft_cache:   Optional[StaticCache] = None
-        self._base_cache:    Optional[StaticCache] = None
-        self._forked: bool = False
+        self._target_cache: Optional[StaticCache] = None
+        self._draft_cache:  Optional[StaticCache] = None
+        self._base_cache:   Optional[StaticCache] = None
 
     # ------------------------------------------------------------------
     # 生命周期 API
     # ------------------------------------------------------------------
 
     def allocate(self) -> None:
-        """预分配所有 StaticCache（每个 sample 开始前调用一次）。
+        """预分配三个独立的 StaticCache（每个 sample 开始前调用一次）。
 
-        target_cache:  独立分配，配置来自 target 模型
-        shared_cache:  Base/Draft 共用，配置来自 small 模型（3B 架构）
-        draft/base_cache 在 fork_caches() 时才创建。
+        三个模型各自持有独立的 StaticCache，无 deepcopy 操作。
+        Draft 和 Base 的 Prefill 分别在各自独立的 cache 上执行。
         """
         self._target_cache = _make_static_cache(
             self._target_config,
@@ -111,37 +95,21 @@ class PrefixSharedCacheManager:
             self._device,
             self._dtype,
         )
-        self._shared_cache = _make_static_cache(
+        self._draft_cache = _make_static_cache(
             self._small_config,
             self._max_batch_size,
             self._max_cache_len,
             self._device,
             self._dtype,
         )
-        self._draft_cache = None
-        self._base_cache  = None
-        self._forked = False
-        logger.debug("StaticCache 预分配完毕  max_cache_len=%d", self._max_cache_len)
-
-    def fork_caches(self) -> Tuple[StaticCache, StaticCache]:
-        """CoW 分叉：将 shared_cache 深拷贝为独立的 draft_cache 和 base_cache。
-
-        调用时机：Prefill 完成后、Decode 阶段第一步开始前。
-        分叉后 shared_cache 不再被任何模型写入，仅供参考。
-
-        Returns:
-            (draft_cache, base_cache)
-        """
-        if self._shared_cache is None:
-            raise RuntimeError("shared_cache 未分配，请先调用 allocate()")
-        if self._forked:
-            raise RuntimeError("fork_caches() 已调用过，禁止重复分叉")
-
-        self._draft_cache = _clone_static_cache(self._shared_cache)
-        self._base_cache  = _clone_static_cache(self._shared_cache)
-        self._forked = True
-        logger.debug("CoW 分叉完成  draft_cache 和 base_cache 已独立")
-        return self._draft_cache, self._base_cache
+        self._base_cache = _make_static_cache(
+            self._small_config,
+            self._max_batch_size,
+            self._max_cache_len,
+            self._device,
+            self._dtype,
+        )
+        logger.debug("三模型 StaticCache 独立预分配完毕  max_cache_len=%d", self._max_cache_len)
 
     def rollback_cache(self, cache: StaticCache, to_seq_len: int) -> None:
         """将 cache 的有效填充长度回退到 to_seq_len。
@@ -222,10 +190,8 @@ class PrefixSharedCacheManager:
         直接丢弃旧 cache 引用，下次 allocate() 时重新分配。
         """
         self._target_cache = None
-        self._shared_cache = None
         self._draft_cache  = None
         self._base_cache   = None
-        self._forked = False
         logger.debug("PrefixSharedCacheManager 重置完毕")
 
     # ------------------------------------------------------------------
@@ -239,24 +205,13 @@ class PrefixSharedCacheManager:
         return self._target_cache
 
     @property
-    def shared_cache(self) -> StaticCache:
-        """Prefill 阶段 Base/Draft 物理共享的 KV Buffer。"""
-        if self._shared_cache is None:
-            raise RuntimeError("shared_cache 未分配，请先调用 allocate()")
-        return self._shared_cache
-
-    @property
     def draft_cache(self) -> StaticCache:
         if self._draft_cache is None:
-            raise RuntimeError("draft_cache 未初始化，请先调用 fork_caches()")
+            raise RuntimeError("draft_cache 未分配，请先调用 allocate()")
         return self._draft_cache
 
     @property
     def base_cache(self) -> StaticCache:
         if self._base_cache is None:
-            raise RuntimeError("base_cache 未初始化，请先调用 fork_caches()")
+            raise RuntimeError("base_cache 未分配，请先调用 allocate()")
         return self._base_cache
-
-    @property
-    def is_forked(self) -> bool:
-        return self._forked

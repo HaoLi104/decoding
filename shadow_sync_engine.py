@@ -11,20 +11,16 @@
   - Base hidden forward 一次性处理 K 个 token，利用 batch 并行性
   - 拒绝后无需 Mini-Prefill Latency Spike（因 Base 已同步到 K 步位置）
 
-工作流程（每步 i）：
-  Phase 1 (Draft propose, 串行 K 步):
-    draft_temp.step(token[i]) → draft_logits[i], token[i+1] = argmax
-
-  Phase 2 (Base batch forward, 一次 forward):
-    decode_batch_hidden_only(base_model, [token[0]..token[K-1]]) → hidden [1, K, H]
-
-  Phase 3 (Lazy LM Head, 仅对 K 个候选位置):
-    extract_logits_at_positions(base_model, hidden, [0..K-1]) → base_logits [1, K, V]
+重要设计说明（CoW 策略）：
+  Proposal 阶段直接写入正式 draft_ctx.cache 和 base_ctx.cache，
+  完成后将 seq_len 重置到提案前的位置（不 deepcopy cache）。
+  后续 sync_accepted/sync_on_correction 会以正确的 position 覆盖 proposal 写入的 KV。
+  这完全规避了 copy.deepcopy(cache) 对 CUDA 张量的极高开销
+  （deepcopy 会通过 config 引用触发整个模型参数的 CPU 拷贝）。
 """
 
 from __future__ import annotations
 
-import copy
 import logging
 from typing import List
 
@@ -38,18 +34,24 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# 辅助：临时 Draft 快照（propose 阶段不污染正式 ctx）
+# 辅助：轻量 Draft 提案句柄（直接使用正式 cache，不拷贝）
 # ---------------------------------------------------------------------------
 
 class _TempDraftSnapshot:
-    """Draft 的临时快照，用于 propose 阶段串行步进。"""
+    """Draft 提案阶段的轻量句柄。
+
+    直接引用 draft_ctx.cache，不做 deepcopy，在正式 cache 上写入提案 KV。
+    提案完成后调用 rollback_seq_len() 将 draft_ctx.seq_len 重置，
+    使后续 sync_accepted/sync_on_correction 以正确位置覆盖提案数据。
+    """
 
     def __init__(self, ctx: ModelContext) -> None:
-        self.model       = ctx.model
-        self.cache       = copy.deepcopy(ctx.cache)  # CoW 隔离
-        self.seq_len     = ctx.seq_len
-        self.last_logits = ctx.last_logits.clone()
-        self.device      = ctx.device
+        self.model            = ctx.model
+        self.cache            = ctx.cache        # 直接引用，不拷贝
+        self.seq_len          = ctx.seq_len
+        self.last_logits      = ctx.last_logits.clone()
+        self.device           = ctx.device
+        self._start_seq_len   = ctx.seq_len      # 记录起始位置，用于 seq_len 回退
 
     def step(self, token_id: int) -> None:
         """执行单步 decode_step，更新 last_logits 和 seq_len。"""
@@ -61,6 +63,14 @@ class _TempDraftSnapshot:
             position_id=self.seq_len,
         )  # shape: [1, vocab_size]
         self.seq_len += 1
+
+    def rollback_seq_len(self, ctx: ModelContext) -> None:
+        """提案结束后将 ctx.seq_len 回退到提案前位置。
+
+        proposal 期间写入 cache 的 KV 是"临时数据"，
+        sync 阶段会以正确的 position_id 覆盖这些位置，无需清零。
+        """
+        ctx.seq_len = self._start_seq_len
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +99,7 @@ class ShadowSyncProposer:
         self._device    = device
 
     def propose_k_tokens(self, k: int) -> ProposalResult:
-        """生成 K 个候选 token（不修改正式 ctx）。
+        """生成 K 个候选 token（proposal 后 seq_len 回退，不修改正式 ctx 的 seq_len）。
 
         Args:
             k: 提案步数（= DecodeConfig.gamma）
@@ -102,6 +112,7 @@ class ShadowSyncProposer:
 
         # ---------------------------------------------------------------
         # Phase 1：Draft 串行步进，收集 K 个候选 token 和 draft_logits
+        # 直接写入 draft_ctx.cache（不 deepcopy）；完成后回退 seq_len
         # ---------------------------------------------------------------
         draft_temp = _TempDraftSnapshot(self._draft_ctx)
 
@@ -122,32 +133,33 @@ class ShadowSyncProposer:
                 # 推进 Draft 临时状态（最后一步不需要，K 个 token 已确定）
                 draft_temp.step(next_token)
 
+        # 回退 draft_ctx.seq_len；sync_accepted 会以正确位置覆盖 proposal KV
+        draft_temp.rollback_seq_len(self._draft_ctx)
+
         # ---------------------------------------------------------------
-        # Phase 2：Base batch hidden forward（一次 forward 处理 K 个 token）
+        # Phase 2：Base batch hidden forward（直接写入 base_ctx.cache，不拷贝）
+        # 完成后回退 base_ctx.seq_len
         # ---------------------------------------------------------------
-        # proposed_tokens: [token_0, token_1, ..., token_{K-1}]
-        # Base 以相同 token 序列 batch forward，得到 K 个位置的 hidden states
         token_ids_tensor = torch.tensor(
             [proposed_tokens], dtype=torch.long, device=self._device
         )  # shape: [1, K]
 
-        # 使用 base_ctx 的正式 cache（不拷贝，因为 hidden_only 不写入 cache 中间结果）
-        # 注意：decode_batch_hidden_only 会写入 cache——因此也需要 CoW 隔离
-        base_cache_copy = copy.deepcopy(self._base_ctx.cache)
+        base_start_seq_len = self._base_ctx.seq_len
 
         # shape: [1, K, hidden_dim]
         base_hidden = decode_batch_hidden_only(
             model=self._base_ctx.model,
             token_ids=token_ids_tensor,
-            cache=base_cache_copy,
+            cache=self._base_ctx.cache,   # 直接使用，不拷贝
             start_position=self._base_ctx.seq_len,
         )
+
+        # 回退 base_ctx.seq_len；sync 会覆盖 proposal 在此范围写入的 KV
+        self._base_ctx.seq_len = base_start_seq_len
 
         # ---------------------------------------------------------------
         # Phase 3：Lazy LM Head —— 对 K 个候选位置提取 Base logits
         # ---------------------------------------------------------------
-        # 所有 K 个位置都需要 base_logits（每个候选都要计算 ΔP）
-        # positions: [0, 1, ..., K-1]（相对于本次 batch 中的位置）
         positions = list(range(k))
 
         # shape: [1, K, vocab_size]

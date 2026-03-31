@@ -82,10 +82,15 @@ class _TempCtxSnapshot:
 
 
 def _snapshot_from_ctx(ctx: ModelContext) -> _TempCtxSnapshot:
-    """从 ModelContext 深拷贝出临时快照（仅拷贝 cache，模型权重共享引用）。"""
+    """从 ModelContext 创建轻量临时快照（直接引用 cache，不拷贝）。
+
+    proposal 阶段写入 cache 的 KV 会在 sync_accepted/sync_on_correction
+    时被正确位置的 KV 覆盖，因此无需 deepcopy cache 来隔离。
+    提案完成后调用方负责将 ctx.seq_len 重置到提案前的位置。
+    """
     return _TempCtxSnapshot(
         model=ctx.model,
-        cache=copy.deepcopy(ctx.cache),   # CoW：深拷贝 cache 以隔离 propose 阶段写入
+        cache=ctx.cache,               # 直接引用，不拷贝，避免 CUDA tensor deepcopy 极高开销
         seq_len=ctx.seq_len,
         last_logits=ctx.last_logits.clone(),
         device=ctx.device,
@@ -148,38 +153,6 @@ class DualStreamProposer:
         draft_logits_per_pos: List[torch.Tensor]  = []
         base_logits_per_pos:  List[torch.Tensor]  = []
 
-        # 当前有效的 Draft logits（用于 argmax 决定下一个 token）
-        current_draft_logits = draft_temp.last_logits  # shape: [1, vocab_size]
-
-        for step_i in range(k):
-            # --- 1. 从当前 Draft logits 贪婪选出候选 token ---
-            next_token = int(current_draft_logits.argmax(dim=-1).item())
-            proposed_tokens.append(next_token)
-
-            # 记录本位置的 Draft logits（当前步的 logits 预测 next_token）
-            draft_logits_per_pos.append(current_draft_logits.clone())
-
-            # --- 2. Draft stream：推进到 next_token，得到下一步 logits ---
-            draft_temp.step(next_token, self.draft_stream)
-
-            # --- 3. Base stream：以相同 next_token 推进，得到 base_logits ---
-            base_temp.step(next_token, self.base_stream)
-
-            # --- 4. 同步屏障：等待两个 stream 均完成 ---
-            # 让默认 stream 等待 draft_stream 和 base_stream
-            torch.cuda.current_stream(self._device).wait_stream(self.draft_stream)
-            torch.cuda.current_stream(self._device).wait_stream(self.base_stream)
-
-            # 记录 Base 本位置的 logits（step 执行后 last_logits 已更新为下一步）
-            # 注意：base_temp.step() 后，last_logits 是 next_token 之后的预测
-            # 我们需要的是"位于 next_token 之前"的 base 分布（即推进前的 logits）
-            # → 因此 Base logits 需在 step() 之前记录（与 Draft 相同位置）
-            # 实现：先记录 base_temp.last_logits（step 前），再执行 step
-            # 但因 step() 在 stream 上异步，需调整为：先记录，再 step
-
-        # 上述逻辑需要重新组织：先记录再步进
-        # 重写为更清晰的实现：
-
         return self._propose_k_tokens_impl(k)
 
     def _propose_k_tokens_impl(self, k: int) -> ProposalResult:
@@ -234,6 +207,10 @@ class DualStreamProposer:
                 draft_temp.seq_len    += 1
                 base_temp.last_logits  = new_base_logits
                 base_temp.seq_len     += 1
+
+        # draft_temp.seq_len / base_temp.seq_len 是 snapshot 自己的计数器，
+        # draft_ctx.seq_len / base_ctx.seq_len 从未被修改，无需回退。
+        # proposal 期间在 cache 写入的 KV 会被 sync_accepted/sync_on_correction 覆盖。
 
         logger.debug(
             "DualStream propose_k=%d  tokens=%s",
