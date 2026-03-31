@@ -176,22 +176,33 @@ class PrefixSharedCacheManager:
         # 通过清零超出 to_seq_len 的 KV Buffer 实现等效物理回退
         # key_cache / value_cache: List[Tensor]，每层一个 Tensor
         # 标准布局: [batch, num_kv_heads, max_cache_len, head_dim]（dim 2 = 序列维度）
-        if hasattr(cache, "key_cache") and isinstance(cache.key_cache, list):
-            for k_t in cache.key_cache:
-                if k_t.ndim == 4:
-                    k_t[:, :, to_seq_len:, :].zero_()
-            for v_t in cache.value_cache:
-                if v_t.ndim == 4:
-                    v_t[:, :, to_seq_len:, :].zero_()
-            logger.debug(
-                "cache 回退（KV Buffer 清零）至 seq_len=%d，共 %d 层",
-                to_seq_len, len(cache.key_cache),
-            )
+        if hasattr(cache, "key_cache"):
+            # key_cache 可能是 list 或 tuple，统一按序列处理
+            kc = cache.key_cache
+            vc = cache.value_cache
+            if isinstance(kc, (list, tuple)) and len(kc) > 0:
+                for k_t in kc:
+                    if isinstance(k_t, torch.Tensor) and k_t.ndim == 4:
+                        # 标准布局: [batch, num_kv_heads, max_cache_len, head_dim]
+                        k_t[:, :, to_seq_len:, :].zero_()
+                for v_t in vc:
+                    if isinstance(v_t, torch.Tensor) and v_t.ndim == 4:
+                        v_t[:, :, to_seq_len:, :].zero_()
+                logger.debug(
+                    "cache 回退（KV Buffer 清零）至 seq_len=%d，共 %d 层",
+                    to_seq_len, len(kc),
+                )
+            else:
+                logger.warning(
+                    "StaticCache.key_cache 类型未知（%s），跳过物理清零，"
+                    "依赖 cache_position 隔离（回退目标 seq_len=%d）",
+                    type(kc).__name__, to_seq_len,
+                )
         else:
             # 未知布局：仅依赖外部 seq_len 控制（forward_ops 通过 cache_position
             # 和 attention_mask 确保正确注意力范围，stale 数据不会被 attend）
             logger.warning(
-                "StaticCache 布局未知，跳过物理清零，依赖 cache_position 隔离 "
+                "StaticCache 无 key_cache 属性，跳过物理清零，依赖 cache_position 隔离 "
                 "（回退目标 seq_len=%d）", to_seq_len
             )
 
