@@ -147,8 +147,13 @@ class PrefixSharedCacheManager:
         """将 cache 的有效填充长度回退到 to_seq_len。
 
         StaticCache 使用固定大小的预分配 buffer，通过重置内部 seen_tokens
-        计数器实现逻辑回退（物理 buffer 中超出范围的旧数据会在下次 forward
-        时被新数据覆盖，因此无需清零）。
+        计数器实现逻辑回退。新版 transformers（>= 4.40）移除了该计数器，
+        改由外部 cache_position 参数全权管理写入位置；此时通过清零超出范围的
+        KV Buffer 实现等效的物理回退，防止注意力旁路泄漏。
+
+        注意：ModelContext.seq_len 在 rollback() 中已同步更新，
+        下次 decode_step/batch_verify 会以正确的 position_id 和 attention_mask
+        覆盖 buffer 中的 stale 数据，因此本函数的清零是防御性操作。
 
         Args:
             cache:      需要回退的 StaticCache（draft_cache 或 base_cache）
@@ -156,19 +161,39 @@ class PrefixSharedCacheManager:
         """
         if cache is None:
             raise RuntimeError("传入的 cache 为 None，无法回退")
-        # StaticCache 通过 _seen_tokens 跟踪已填充的位置数
-        # 直接修改该计数器实现逻辑回退
+
+        # 尝试旧版 transformers（< 4.40）内部计数器重置
         if hasattr(cache, "_seen_tokens"):
             cache._seen_tokens = to_seq_len
-        elif hasattr(cache, "seen_tokens"):
+            logger.debug("cache 回退（_seen_tokens）至 seq_len=%d", to_seq_len)
+            return
+        if hasattr(cache, "seen_tokens"):
             cache.seen_tokens = to_seq_len
-        else:
-            # 兼容不同 transformers 版本的内部字段名
-            raise AttributeError(
-                "StaticCache 无 _seen_tokens / seen_tokens 属性，"
-                "请检查 transformers 版本（需 >= 4.38）"
+            logger.debug("cache 回退（seen_tokens）至 seq_len=%d", to_seq_len)
+            return
+
+        # 新版 transformers（>= 4.40）：StaticCache 不维护内部序列计数器
+        # 通过清零超出 to_seq_len 的 KV Buffer 实现等效物理回退
+        # key_cache / value_cache: List[Tensor]，每层一个 Tensor
+        # 标准布局: [batch, num_kv_heads, max_cache_len, head_dim]（dim 2 = 序列维度）
+        if hasattr(cache, "key_cache") and isinstance(cache.key_cache, list):
+            for k_t in cache.key_cache:
+                if k_t.ndim == 4:
+                    k_t[:, :, to_seq_len:, :].zero_()
+            for v_t in cache.value_cache:
+                if v_t.ndim == 4:
+                    v_t[:, :, to_seq_len:, :].zero_()
+            logger.debug(
+                "cache 回退（KV Buffer 清零）至 seq_len=%d，共 %d 层",
+                to_seq_len, len(cache.key_cache),
             )
-        logger.debug("cache 回退至 seq_len=%d", to_seq_len)
+        else:
+            # 未知布局：仅依赖外部 seq_len 控制（forward_ops 通过 cache_position
+            # 和 attention_mask 确保正确注意力范围，stale 数据不会被 attend）
+            logger.warning(
+                "StaticCache 布局未知，跳过物理清零，依赖 cache_position 隔离 "
+                "（回退目标 seq_len=%d）", to_seq_len
+            )
 
     def reset(self) -> None:
         """重置所有 cache（下一个 sample 开始前调用）。
