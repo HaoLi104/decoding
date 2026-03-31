@@ -159,6 +159,26 @@ class StandardSD(AcceptanceStrategy):
                 p_target=p_target,
             )
 
+        # greedy 模式（t_sample=0）：直接对比 argmax，保证与 target-only greedy 等价
+        if ctx.t_sample == 0.0:
+            target_top1 = _argmax_token(ctx.logit_target)
+            if target_top1 == x:
+                return AcceptResult(
+                    accepted=True,
+                    chosen_token_id=x,
+                    reason="standard_greedy_accepted",
+                    p_draft=p_draft,
+                    p_target=p_target,
+                )
+            else:
+                return AcceptResult(
+                    accepted=False,
+                    chosen_token_id=target_top1,
+                    reason="standard_greedy_rejected",
+                    p_draft=p_draft,
+                    p_target=p_target,
+                )
+
         p_accept = min(1.0, p_target / p_draft)
 
         # 随机验收
@@ -172,21 +192,21 @@ class StandardSD(AcceptanceStrategy):
             )
         else:
             # 从修正分布采样矫正 token：max(0, P_target - P_draft)
-            p_t_full = F.softmax(ctx.logit_target / max(self._t_fixed, 1e-9), dim=-1)  # [1, V_target]
-            p_d_full = F.softmax(ctx.logit_draft  / max(self._t_fixed, 1e-9), dim=-1)  # [1, V_draft]
-            # #region agent log - debug ecc61b
-            logger.debug("[DBG-ecc61b] StandardSD vocab align: V_target=%d V_draft=%d", p_t_full.shape[-1], p_d_full.shape[-1])
-            # #endregion
-            # Target(32B) vocab=152064, Draft(3B) vocab=151936，取最小公共词表避免广播失败
-            _v = min(p_t_full.shape[-1], p_d_full.shape[-1])
-            corrected = F.relu(p_t_full[..., :_v] - p_d_full[..., :_v])
-            corrected_sum = corrected.sum()
-            if corrected_sum < 1e-12:
-                # 退化为 target 贪婪
+            # greedy 模式（t_sample=0）直接取 target argmax，避免引入随机性
+            if ctx.t_sample == 0.0:
                 chosen = _argmax_token(ctx.logit_target)
             else:
-                corrected = corrected / corrected_sum
-                chosen = int(torch.multinomial(corrected, num_samples=1).item())
+                p_t_full = F.softmax(ctx.logit_target / max(self._t_fixed, 1e-9), dim=-1)  # [1, V_target]
+                p_d_full = F.softmax(ctx.logit_draft  / max(self._t_fixed, 1e-9), dim=-1)  # [1, V_draft]
+                # Target(32B) vocab=152064, Draft(3B) vocab=151936，取最小公共词表避免广播失败
+                _v = min(p_t_full.shape[-1], p_d_full.shape[-1])
+                corrected = F.relu(p_t_full[..., :_v] - p_d_full[..., :_v])
+                corrected_sum = corrected.sum()
+                if corrected_sum < 1e-12:
+                    chosen = _argmax_token(ctx.logit_target)
+                else:
+                    corrected = corrected / corrected_sum
+                    chosen = int(torch.multinomial(corrected, num_samples=1).item())
 
             return AcceptResult(
                 accepted=False,
