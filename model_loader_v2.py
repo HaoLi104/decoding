@@ -135,6 +135,15 @@ def load_tri_models(
     logger.info("=== 开始加载三模型（单卡极致内聚架构）===")
     logger.info("device=%s  dtype=%s  compile=%s", device, dtype, compile_mode)
 
+    # #region agent log - debug ecc61b
+    import json, time, os as _os
+    logger.info("[DBG-ecc61b] ModelPaths.TARGET=%s", paths.TARGET)
+    logger.info("[DBG-ecc61b] ModelPaths.BASE=%s", paths.BASE)
+    logger.info("[DBG-ecc61b] ModelPaths.DRAFT=%s", paths.DRAFT)
+    logger.info("[DBG-ecc61b] config_v2 file=%s", _os.path.abspath(__import__('config_v2').__file__))
+    logger.info("[DBG-ecc61b] DRAFT local exists=%s", _os.path.isdir(paths.DRAFT))
+    # #endregion
+
     # 1. 加载 tokenizer（以 target 为基准，Qwen 系列词表一致）
     tokenizer = load_tokenizer(paths.TARGET)
 
