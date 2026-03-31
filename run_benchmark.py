@@ -228,6 +228,24 @@ def _build_proposer(
 # 单次配置完整评测
 # ---------------------------------------------------------------------------
 
+def _try_load_completed(config: DecodeConfig, out_dir: Path) -> Optional[BenchmarkResult]:
+    """若该配置已完成（summary JSON 存在），直接加载并返回；否则返回 None。"""
+    config_tag = (
+        f"{config.strategy.value}_arch-{config.arch.value}"
+        f"_alpha{config.alpha:.2f}_t{config.t_sample:.1f}"
+    )
+    summary_path = out_dir / f"{config_tag}_summary.json"
+    if summary_path.exists():
+        try:
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+            result = BenchmarkResult(**data)
+            logger.info("⏭ 跳过已完成配置  config=%s  acc=%.4f", config_tag, result.accuracy)
+            return result
+        except Exception as e:
+            logger.warning("加载已完成配置失败，将重新跑: %s  err=%s", config_tag, e)
+    return None
+
+
 def run_single_config(
     config:     DecodeConfig,
     dataset:    List[Dict[str, Any]],
@@ -238,6 +256,8 @@ def run_single_config(
     out_dir:    Path,
 ) -> BenchmarkResult:
     """在给定 DecodeConfig 下跑完整个数据集，返回汇总 BenchmarkResult。
+
+    若 summary JSON 已存在（配置完整完成过），直接加载跳过，不重跑。
 
     Args:
         config:       完整解码配置（策略、架构、α、T_sample 等）
@@ -251,6 +271,11 @@ def run_single_config(
     Returns:
         BenchmarkResult
     """
+    # 断点续跑：若已有完整 summary，直接复用
+    cached = _try_load_completed(config, out_dir)
+    if cached is not None:
+        return cached
+
     device = torch.device("cuda:0")
     tokenizer = bundle.tokenizer
 
