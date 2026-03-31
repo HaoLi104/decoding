@@ -2,8 +2,14 @@
 微调数据准备脚本 — 生成 Qwen2.5-3B-Instruct-Medical 训练集
 
 混合比例（实验计划 Section 3）：
-  75% medalpaca/medical_meadow_medqa  — 医学 MCQ + 解析，注入医学实体
-  25% tatsu-lab/alpaca                — 通用指令数据，充当「格式锚点」防止 Chat Template 坍塌
+  75% GBaker/MedQA-USMLE-4-options (train split)
+       — 与测试集同源的 MCQ 数据，格式完全对齐（answer_idx: A/B/C/D）
+       — 输出统一为 "Final answer: X"，防止格式坍塌
+  25% tatsu-lab/alpaca — 通用指令数据，充当「格式锚点」防止 Chat Template 坍塌
+
+关键设计：训练输出格式必须与评测脚本 run_baseline.py 完全一致：
+  "Final answer: X"
+否则 extract_answer() 无法匹配，评测准确率虚假归零。
 
 输出格式：LLaMA-Factory alpaca_format（JSON）
   [{"instruction": "...", "input": "...", "output": "..."}]
@@ -17,7 +23,7 @@
   conda activate kvner
   python prepare_finetune_data.py \\
     --out_dir /data/ocean/decoding/data \\
-    --medical_limit 20000 \\
+    --medical_limit 10000 \\
     --general_ratio 0.25 \\
     --val_size 0.05 \\
     --seed 42
@@ -36,37 +42,53 @@ from typing import Any, Dict, List
 # 数据集加载
 # ---------------------------------------------------------------------------
 
-def load_medical_meadow_medqa(limit: int) -> List[Dict[str, Any]]:
-    """加载 medalpaca/medical_meadow_medqa，转换为 alpaca 格式。
+def load_gbaker_medqa_mcq(limit: int) -> List[Dict[str, Any]]:
+    """加载 GBaker/MedQA-USMLE-4-options 训练集，转换为 alpaca 格式。
 
     原始字段：
-      question (str): 含 A/B/C/D 选项的完整题目文本
-      answer   (str): 正确选项字母（A/B/C/D/E）
+      question   (str):  题干
+      options    (dict): {"A": "...", "B": "...", "C": "...", "D": "..."}
+      answer_idx (str):  正确选项字母（A/B/C/D）
 
-    转换后：
-      instruction: 医学问答系统提示 + 题目
-      input:       "" (空，选项已含在 question 中)
-      output:      "The correct answer is X."
+    转换后输出格式严格对齐 run_baseline.py 的 extract_answer() 期望：
+      instruction: 系统提示（与 run_baseline.py SYSTEM_PROMPT 一致）
+      input:       题干 + 选项
+      output:      "Final answer: X"   ← 关键：与评测脚本完全一致
+
+    与测试集同源（同一数据集的 train/test split），确保：
+      1. 格式不会崩塌
+      2. ΔP 信号在测试题型上有效
     """
     from datasets import load_dataset
 
-    ds = load_dataset("medalpaca/medical_meadow_medqa", split="train")
+    ds = load_dataset("GBaker/MedQA-USMLE-4-options", split="train")
+
+    SYSTEM_INSTRUCTION = (
+        "You are a medical expert. "
+        "Answer the following multiple-choice question. "
+        "End your response with exactly one line: 'Final answer: X' "
+        "where X is the letter (A/B/C/D) of the best answer. "
+        "Do not add any text after that line."
+    )
+
     records = []
     for item in ds:
-        question = str(item.get("input", "")).strip()
-        answer   = str(item.get("output", "")).strip()
-        if not question or not answer:
+        question   = str(item.get("question", "")).strip()
+        options    = item.get("options", {})
+        answer_idx = str(item.get("answer_idx", "")).strip().upper()
+
+        if not question or not options or answer_idx not in "ABCD":
             continue
 
-        instruction = (
-            "You are a medical expert. "
-            "Answer the following multiple-choice question by selecting the single best answer. "
-            "Provide the answer letter followed by a brief explanation."
+        opts_text = "\n".join(
+            "{k}. {v}".format(k=k, v=v) for k, v in sorted(options.items())
         )
+        input_text = "Question: {q}\n\nOptions:\n{o}".format(q=question, o=opts_text)
+
         records.append({
-            "instruction": instruction,
-            "input":       question,
-            "output":      answer,
+            "instruction": SYSTEM_INSTRUCTION,
+            "input":       input_text,
+            "output":      "Final answer: {x}".format(x=answer_idx),
         })
         if len(records) >= limit:
             break
@@ -159,9 +181,9 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 1：加载医学数据（75%）
     # -----------------------------------------------------------------------
-    print(f"[1/4] 加载 medalpaca/medical_meadow_medqa  limit={args.medical_limit}")
-    medical_records = load_medical_meadow_medqa(limit=args.medical_limit)
-    print(f"      医学样本数: {len(medical_records)}")
+    print("[1/4] 加载 GBaker/MedQA-USMLE-4-options (train)  limit={lim}".format(lim=args.medical_limit))
+    medical_records = load_gbaker_medqa_mcq(limit=args.medical_limit)
+    print("      医学 MCQ 样本数: {n}".format(n=len(medical_records)))
 
     # -----------------------------------------------------------------------
     # Step 2：按比例计算通用数据量（25%）
