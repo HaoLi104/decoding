@@ -130,16 +130,6 @@ class PrefixSharedCacheManager:
         if cache is None:
             raise RuntimeError("传入的 cache 为 None，无法回退")
 
-        # #region agent log - debug ecc61b：诊断 cache 实际类型（仅首次触发）
-        if not getattr(self, "_cache_type_logged", False):
-            logger.info(
-                "[DBG-ecc61b] rollback cache type=%s  attrs=%s",
-                type(cache).__name__,
-                [a for a in dir(cache) if not a.startswith("__")],
-            )
-            self._cache_type_logged = True
-        # #endregion
-
         # 尝试旧版 transformers（< 4.40）内部计数器重置
         if hasattr(cache, "_seen_tokens"):
             cache._seen_tokens = to_seq_len
