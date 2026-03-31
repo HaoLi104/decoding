@@ -39,24 +39,49 @@ from tqdm import tqdm
 
 
 # ---------------------------------------------------------------------------
-# 答案抽取（兼容多种输出格式）
+# 答案抽取（与参考脚本 medqa_test_single_model_vllm(3).py 对齐）
 # ---------------------------------------------------------------------------
 
-_RE_ANSWER_LETTER = [
-    re.compile(r"The\s+correct\s+answer\s+is\s*[:：]?\s*\*{0,2}([A-D])\b", re.I),
-    re.compile(r"Final\s+answer\s*[:：]?\s*\*{0,2}([A-D])\b", re.I),
-    re.compile(r"\bAnswer\s*[:：]?\s*\*{0,2}([A-D])\b", re.I),
-    re.compile(r"^\s*([A-D])\s*[.)]\s*$", re.M),
-    re.compile(r"^\s*([A-D])\s*$", re.M),
+_RE_THINK        = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_RE_ANSWER_BLOCK = re.compile(r"<answer>(.*?)</answer>", re.DOTALL | re.IGNORECASE)
+
+_STRONG_PATTERNS = [
+    re.compile(r"The\s+correct\s+answer\s+is\s*[:：]?\s*(?:\*\*|\*)?\s*([A-D])\b", re.IGNORECASE),
+    re.compile(r"Final\s+answer\s*[:：]?\s*(?:\*\*|\*)?\s*([A-D])\b", re.IGNORECASE),
+    re.compile(r"\bAnswer\s*[:：]?\s*(?:\*\*|\*)?\s*([A-D])\b", re.IGNORECASE),
+    re.compile(r"The\s+correct\s+answer\s+is\s*[:：]?\s*(?:\*\*|\*)?\s*([A-D])\s*[.)]\s*", re.IGNORECASE),
 ]
+_RE_LASTLINE_LETTER       = re.compile(r"^\s*(?:option\s*)?([A-D])\s*$", re.IGNORECASE)
+_RE_LASTLINE_LETTER_PUNCT = re.compile(r"^\s*(?:option\s*)?([A-D])\s*[.)]\s*$", re.IGNORECASE)
 
 
-def extract_answer(text: str) -> str:
-    """从模型输出中抽取 A/B/C/D，无法抽取时返回 ''。"""
-    for pat in _RE_ANSWER_LETTER:
-        m = pat.search(text)
-        if m:
-            return m.group(1).upper()
+def extract_answer(response: str, tail_chars: int = 1500) -> str:
+    """从模型输出中抽取 A/B/C/D。
+
+    策略（与参考脚本保持一致）：
+    1. 剥离 <think>…</think> 块，避免从推理过程中误提取早期结论
+    2. 优先解析 <answer>…</answer> 标签内的内容
+    3. 否则只搜索末尾 tail_chars 字符，避免选项列举干扰
+    4. 多次匹配取最后一个（更接近最终答案）
+    5. 最终 fallback：检查末尾几行是否为单独字母
+    """
+    if not response:
+        return ""
+    text  = _RE_THINK.sub("", response)
+    m     = _RE_ANSWER_BLOCK.search(text)
+    scope = m.group(1) if m else text[-tail_chars:]
+
+    for pat in _STRONG_PATTERNS:
+        matches = list(pat.finditer(scope))
+        if matches:
+            return matches[-1].group(1).upper()
+
+    lines = [ln.strip() for ln in scope.splitlines() if ln.strip()]
+    for ln in reversed(lines[-8:]):
+        mm = _RE_LASTLINE_LETTER.match(ln) or _RE_LASTLINE_LETTER_PUNCT.match(ln)
+        if mm:
+            return mm.group(1).upper()
+
     return ""
 
 
@@ -104,9 +129,13 @@ def build_prompt(item: dict, tokenizer) -> str:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": content},
     ]
-    return tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+    kwargs = {"tokenize": False, "add_generation_prompt": True}
+    try:
+        # 对支持 thinking 模式的 Qwen3 系列关闭 thinking，节省 token 预算
+        kwargs["enable_thinking"] = False
+    except Exception:
+        pass
+    return tokenizer.apply_chat_template(messages, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -164,16 +193,17 @@ def evaluate(
         for i, item in enumerate(batch_items):
             gen_text   = tokenizer.decode(gen_ids[i], skip_special_tokens=True)
             pred       = extract_answer(gen_text)
-            gold       = str(item.get("answer", "")).strip().upper()
+            # GBaker/MedQA-USMLE-4-options 的答案字段为 answer_idx（A/B/C/D）
+            gold       = str(item.get("answer_idx", item.get("answer", ""))).strip().upper()
             is_correct = (pred == gold) and (pred != "")
 
             correct += int(is_correct)
             results.append({
-                "question":   item["question"][:120],
-                "gold":       gold,
-                "pred":       pred,
-                "correct":    is_correct,
-                "gen_text":   gen_text[:300],
+                "question": item["question"][:120],
+                "gold":     gold,
+                "pred":     pred,
+                "correct":  is_correct,
+                "gen_text": gen_text[:400],
             })
 
     n          = len(results)
