@@ -199,8 +199,15 @@ class PrefixSharedCacheManager:
                     type(kc).__name__, to_seq_len,
                 )
         else:
-            # 未知布局：仅依赖外部 seq_len 控制（forward_ops 通过 cache_position
-            # 和 attention_mask 确保正确注意力范围，stale 数据不会被 attend）
+            # key_cache 属性不存在：打印实际属性名辅助诊断，首次打印后静默
+            # #region agent log - debug ecc61b
+            if not getattr(rollback_cache, "_dbg_printed", False):
+                actual_attrs = [a for a in dir(cache) if not a.startswith("__")]
+                logger.warning(
+                    "[DBG-ecc61b] StaticCache 实际属性列表: %s", actual_attrs
+                )
+                rollback_cache._dbg_printed = True  # type: ignore[attr-defined]
+            # #endregion
             logger.warning(
                 "StaticCache 无 key_cache 属性，跳过物理清零，依赖 cache_position 隔离 "
                 "（回退目标 seq_len=%d）", to_seq_len
