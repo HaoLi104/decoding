@@ -17,12 +17,15 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 from config_v2 import DomainSignalParams, StrategyType
 from domain_signal import (
@@ -169,9 +172,14 @@ class StandardSD(AcceptanceStrategy):
             )
         else:
             # 从修正分布采样矫正 token：max(0, P_target - P_draft)
-            p_t_full = F.softmax(ctx.logit_target / max(self._t_fixed, 1e-9), dim=-1)  # [1, V]
-            p_d_full = F.softmax(ctx.logit_draft  / max(self._t_fixed, 1e-9), dim=-1)  # [1, V]
-            corrected = F.relu(p_t_full - p_d_full)
+            p_t_full = F.softmax(ctx.logit_target / max(self._t_fixed, 1e-9), dim=-1)  # [1, V_target]
+            p_d_full = F.softmax(ctx.logit_draft  / max(self._t_fixed, 1e-9), dim=-1)  # [1, V_draft]
+            # #region agent log - debug ecc61b
+            logger.debug("[DBG-ecc61b] StandardSD vocab align: V_target=%d V_draft=%d", p_t_full.shape[-1], p_d_full.shape[-1])
+            # #endregion
+            # Target(32B) vocab=152064, Draft(3B) vocab=151936，取最小公共词表避免广播失败
+            _v = min(p_t_full.shape[-1], p_d_full.shape[-1])
+            corrected = F.relu(p_t_full[..., :_v] - p_d_full[..., :_v])
             corrected_sum = corrected.sum()
             if corrected_sum < 1e-12:
                 # 退化为 target 贪婪
@@ -404,7 +412,9 @@ class SoftGuidanceC2(AcceptanceStrategy):
         )
 
         # 残差注入：Logit'_target = logit_target + α · ΔLogit_norm
-        logit_target_prime = ctx.logit_target + self._alpha * delta_logit_norm  # [1, V]
+        # Target(32B) vocab 与 draft/base(3B) vocab 可能不同，截断对齐后再相加
+        _v2 = min(ctx.logit_target.shape[-1], delta_logit_norm.shape[-1])
+        logit_target_prime = ctx.logit_target[..., :_v2] + self._alpha * delta_logit_norm[..., :_v2]  # [1, _v2]
 
         # 基于修正后的 Target logit 计算概率
         p_target_prime = _prob_at(logit_target_prime, x, self._t_fixed)
@@ -440,9 +450,11 @@ class SoftGuidanceC2(AcceptanceStrategy):
             )
         else:
             # 从修正 logit 的概率分布中采样矫正 token
-            p_tp_full = F.softmax(logit_target_prime / max(self._t_fixed, 1e-9), dim=-1)
-            p_d_full  = F.softmax(ctx.logit_draft    / max(self._t_fixed, 1e-9), dim=-1)
-            corrected = F.relu(p_tp_full - p_d_full)
+            p_tp_full = F.softmax(logit_target_prime / max(self._t_fixed, 1e-9), dim=-1)  # [1, _v2]
+            p_d_full  = F.softmax(ctx.logit_draft    / max(self._t_fixed, 1e-9), dim=-1)  # [1, V_draft]
+            # 已在 logit_target_prime 截断为 _v2，再对 p_d_full 对齐
+            _v3 = min(p_tp_full.shape[-1], p_d_full.shape[-1])
+            corrected = F.relu(p_tp_full[..., :_v3] - p_d_full[..., :_v3])
             corrected_sum = corrected.sum()
             if corrected_sum < 1e-12:
                 chosen = _argmax_token(logit_target_prime)
