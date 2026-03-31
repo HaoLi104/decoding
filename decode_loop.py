@@ -154,6 +154,10 @@ class SpeculativeDecodeLoop:
                 [proposal.proposed_tokens], dtype=torch.long, device=target_ctx.device
             )  # shape: [1, gamma_now]
 
+            # batch_verify 之前保存 last_logits：这是验证 t₀ 所需的 P(t₀ | context)
+            # target_logits_full[:, i, :] = P(t_{i+1} | context, t₀..tᵢ)，比验证需求晚一步
+            prev_target_logits = target_ctx.last_logits.clone()  # shape: [1, V]
+
             # shape: [1, gamma_now, vocab_size]
             target_logits_full = decode_batch_verify(
                 model=target_ctx.model,
@@ -163,14 +167,16 @@ class SpeculativeDecodeLoop:
             )
             # 更新 target_ctx seq_len（cache 已写入）
             target_ctx.seq_len += gamma_now
-            # 更新 last_logits 为批次最后一位
+            # 更新 last_logits 为批次最后一位（全部接受时用于下轮位置 0 的验证基础）
             target_ctx.last_logits = target_logits_full[:, -1, :]  # shape: [1, V]
 
-            # 拆分为逐位 logits 列表
-            target_logits_per_pos: List[torch.Tensor] = [
-                target_logits_full[:, i, :]  # shape: [1, V]
-                for i in range(gamma_now)
-            ]
+            # 正确的逐位验证 logits（位移修正）：
+            #   pos_i=0: P(t₀ | context)               = prev_target_logits
+            #   pos_i=j: P(tⱼ | context, t₀..t_{j-1}) = target_logits_full[:, j-1, :]
+            target_logits_per_pos: List[torch.Tensor] = (
+                [prev_target_logits] +
+                [target_logits_full[:, i, :] for i in range(gamma_now - 1)]
+            )  # len = gamma_now，每个 shape: [1, V]
 
             # -------------------------------------------------------
             # Step 3：逐位验收（Strategy Routing）

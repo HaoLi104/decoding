@@ -146,6 +146,9 @@ class ShadowSyncProposer:
 
         base_start_seq_len = self._base_ctx.seq_len
 
+        # batch_verify 之前保存 base 的 last_logits：验证 t₀ 需要 P(t₀ | context)
+        prev_base_logits = self._base_ctx.last_logits.clone()  # shape: [1, V]
+
         # shape: [1, K, hidden_dim]
         base_hidden = decode_batch_hidden_only(
             model=self._base_ctx.model,
@@ -158,22 +161,30 @@ class ShadowSyncProposer:
         self._base_ctx.seq_len = base_start_seq_len
 
         # ---------------------------------------------------------------
-        # Phase 3：Lazy LM Head —— 对 K 个候选位置提取 Base logits
+        # Phase 3：Lazy LM Head —— 对 K-1 个中间位置提取 Base logits
+        # base_logits_batch[:, i, :] = P(t_{i+1} | context, t₀..tᵢ)，比验证需求晚一步
+        # 位移修正：pos_i=0 用 prev_base_logits，pos_i=j 用 logits_batch[:, j-1, :]
         # ---------------------------------------------------------------
-        positions = list(range(k))
+        # 只需提取 k-1 个中间位置（位置 0..k-2 对应验证 pos 1..k-1）
+        positions = list(range(k - 1)) if k > 1 else []
 
-        # shape: [1, K, vocab_size]
-        base_logits_batch = extract_logits_at_positions(
-            model=self._base_ctx.model,
-            hidden_states=base_hidden,
-            positions=positions,
-        )
-
-        # 拆分为逐位置列表，每个 shape: [1, vocab_size]
-        base_logits_per_pos: List[torch.Tensor] = [
-            base_logits_batch[:, i, :]  # shape: [1, vocab_size]
-            for i in range(k)
-        ]
+        if positions:
+            # shape: [1, K-1, vocab_size]
+            base_logits_batch = extract_logits_at_positions(
+                model=self._base_ctx.model,
+                hidden_states=base_hidden,
+                positions=positions,
+            )
+            # 正确的逐位置 Base logits（位移修正）：
+            #   pos_i=0: P(t₀ | context)               = prev_base_logits
+            #   pos_i=j: P(tⱼ | context, t₀..t_{j-1}) = base_logits_batch[:, j-1, :]
+            base_logits_per_pos: List[torch.Tensor] = (
+                [prev_base_logits] +
+                [base_logits_batch[:, i, :] for i in range(k - 1)]
+            )
+        else:
+            # k=1：只有一个位置，直接用 prev_base_logits
+            base_logits_per_pos = [prev_base_logits]
 
         logger.debug(
             "ShadowSync propose_k=%d  tokens=%s",
