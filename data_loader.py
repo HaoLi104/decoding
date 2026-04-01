@@ -2,8 +2,12 @@
 数据加载与提示格式化模块
 """
 
+import os
 from typing import Dict, List, Optional, Tuple
 import re
+
+# 国内服务器无法直连 HuggingFace，优先使用镜像站。
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 from datasets import load_dataset
 from transformers import AutoTokenizer

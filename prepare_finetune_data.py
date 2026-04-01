@@ -33,9 +33,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any, Dict, List
+
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 
 # ---------------------------------------------------------------------------

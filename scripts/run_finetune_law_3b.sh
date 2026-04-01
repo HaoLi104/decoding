@@ -43,6 +43,10 @@ done
 # ---- 单卡绑定 ---------------------------------------------------------------
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
+# ---- HuggingFace 镜像（国内服务器无法直连 hf，使用 hf-mirror.com）-------
+export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
+echo "[网络] HF_ENDPOINT=${HF_ENDPOINT}"
+
 mkdir -p "${LOG_DIR}"
 echo "[$(date '+%H:%M:%S')] 日志目录: ${LOG_DIR}"
 

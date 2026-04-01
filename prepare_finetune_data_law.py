@@ -42,9 +42,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any, Dict, List
+
+# 国内服务器无法直连 HuggingFace，优先使用镜像站。
+# 若用户已在环境中设置 HF_ENDPOINT 则尊重用户设置。
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 
 # ---------------------------------------------------------------------------
