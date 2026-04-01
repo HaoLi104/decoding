@@ -41,6 +41,7 @@ import torch
 
 from acceptance import create_strategy
 from cache_manager import PrefixSharedCacheManager
+from forward_ops import decode_step, prefill
 from config_v2 import (
     ALPHA_GRID,
     TEMPERATURE_GRID,
@@ -260,6 +261,150 @@ def merge_session_with_disk(
     for r in session:
         by_key[_benchmark_result_merge_key(r)] = r
     return list(by_key.values())
+
+
+def run_pure_target_baseline(
+    bundle:       TriModelBundle,
+    cache_mgr:    PrefixSharedCacheManager,
+    dataset:      List[Dict[str, Any]],
+    dataset_name: str,
+    max_new_tokens: int,
+    out_dir:      Path,
+) -> BenchmarkResult:
+    """用与投机解码完全相同的 model.forward() 手写循环跑纯 Target greedy。
+
+    这是计算「公平加速比」的分母基线：
+        speedup = spec_tps / pure_target_tps（同框架）
+    而不是与 model.generate() 的 31 tps 相比。
+
+    Args:
+        bundle:         三模型 Bundle（只使用 target 和 tokenizer）
+        cache_mgr:      PrefixSharedCacheManager（每 sample 调用 reset()）
+        dataset:        已加载的样本列表
+        dataset_name:   "medqa" / "gsm8k"
+        max_new_tokens: 每 sample 最大生成长度
+        out_dir:        结果输出目录
+
+    Returns:
+        BenchmarkResult（strategy="pure_target"，alpha=-1，接受率=1.0 by definition）
+    """
+    device    = torch.device("cuda:0")
+    tokenizer = bundle.tokenizer
+    model     = bundle.target          # 只用 target 模型
+
+    config_tag   = "pure_target_arch-none_alpha-1.00_t0.0"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results_path = out_dir / f"{config_tag}.jsonl"
+
+    # 若已完成则直接加载
+    summary_path = out_dir / f"{config_tag}_summary.json"
+    if summary_path.exists():
+        try:
+            data   = json.loads(summary_path.read_text(encoding="utf-8"))
+            result = BenchmarkResult(**{k: v for k, v in data.items()
+                                        if k in {f.name for f in fields(BenchmarkResult)}})
+            logger.info("⏭ 跳过已完成 pure_target 基线  acc=%.4f  tps=%.1f",
+                        result.accuracy, result.tokens_per_sec)
+            return result
+        except Exception as e:
+            logger.warning("加载 pure_target summary 失败，将重跑: %s", e)
+
+    results_fh = results_path.open("w", encoding="utf-8")
+    correct      = 0
+    total_tokens = 0
+    total_time   = 0.0
+    n_processed  = 0
+
+    logger.info("开始 pure_target 基线（手写 forward 循环）  n=%d", len(dataset))
+
+    for idx, item in enumerate(dataset):
+        sample_id   = str(item.get("id", idx))
+        prompt_text = _format_prompt(item, tokenizer, dataset_name)
+        prompt_ids  = tokenizer(prompt_text, return_tensors="pt")["input_ids"].to(device)
+        prompt_len  = prompt_ids.shape[1]
+
+        # 使用 target_cache，每 sample 前 reset
+        cache_mgr.reset()
+        target_cache = cache_mgr.target_cache
+
+        t0 = time.perf_counter()
+
+        # Prefill
+        last_logits = prefill(model, prompt_ids, target_cache)  # shape: [1, V]
+        seq_len     = prompt_len
+
+        generated: List[int] = []
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+
+        # 纯 Target 贪婪 decode loop（每步一个 token）
+        while len(generated) < max_new_tokens:
+            next_token = int(last_logits.argmax(dim=-1).item())  # greedy
+            generated.append(next_token)
+            if eos_id is not None and next_token == eos_id:
+                break
+            # 单步 decode_step
+            last_logits = decode_step(
+                model=model,
+                token_id=next_token,
+                cache=target_cache,
+                seq_len=seq_len,
+            )  # shape: [1, V]
+            seq_len += 1
+
+        elapsed = time.perf_counter() - t0
+
+        # 解码 + 评估
+        response   = tokenizer.decode(generated, skip_special_tokens=True)
+        pred       = _extract_pred(response, dataset_name)
+        gt         = str(item.get("gt", "")).strip()
+        is_correct = _check_correct(pred, gt, dataset_name)
+
+        if is_correct:
+            correct += 1
+        total_tokens += len(generated)
+        total_time   += elapsed
+        n_processed  += 1
+
+        record = {
+            "id": sample_id, "gt": gt, "pred": pred, "correct": is_correct,
+            "generated_tokens": len(generated), "duration_sec": elapsed,
+            "tokens_per_sec": len(generated) / elapsed if elapsed > 0 else 0.0,
+        }
+        results_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        results_fh.flush()
+
+        if (idx + 1) % 20 == 0:
+            logger.info("[pure_target %d/%d] acc=%.3f  tps=%.1f",
+                        idx + 1, len(dataset),
+                        correct / n_processed,
+                        total_tokens / total_time if total_time > 0 else 0.0)
+
+    results_fh.close()
+
+    n        = n_processed
+    accuracy = correct / n if n else 0.0
+    avg_tps  = total_tokens / total_time if total_time > 0 else 0.0
+
+    bench = BenchmarkResult(
+        strategy="pure_target",
+        arch="none",
+        alpha=-1.0,
+        t_sample=0.0,
+        dataset=dataset_name,
+        n_cases=n,
+        accuracy=accuracy,
+        correct=correct,
+        tokens_per_sec=avg_tps,
+        mean_acceptance_rate=1.0,
+        override_rate=0.0,
+        total_generated=total_tokens,
+        total_duration_sec=total_time,
+    )
+    summary_path.write_text(
+        json.dumps(asdict(bench), ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    logger.info("✓ pure_target 基线完成  acc=%.4f  tps=%.1f", accuracy, avg_tps)
+    return bench
 
 
 def _try_load_completed(config: DecodeConfig, out_dir: Path) -> Optional[BenchmarkResult]:
@@ -628,6 +773,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="不加载模型；仅扫描 out_dir 内 *_summary.json 合并生成 summary_table.md / .json",
     )
+    p.add_argument(
+        "--pure_target_baseline",
+        action="store_true",
+        help="在网格搜索前先跑纯 Target 手写循环基线，作为公平加速比的分母",
+    )
 
     return p
 
@@ -716,6 +866,19 @@ def main() -> None:
         tau=args.tau,
     )
 
+    # 可选：先跑 pure_target 手写循环基线（公平加速比分母）
+    pure_target_result: Optional[BenchmarkResult] = None
+    if args.pure_target_baseline:
+        logger.info("=== 运行 pure_target 手写循环基线 ===")
+        pure_target_result = run_pure_target_baseline(
+            bundle=bundle,
+            cache_mgr=cache_mgr,
+            dataset=dataset,
+            dataset_name=args.dataset,
+            max_new_tokens=args.max_new_tokens,
+            out_dir=out_dir,
+        )
+
     # 启动网格搜索
     logger.info("=== 开始网格搜索 ===")
     logger.info(
@@ -749,11 +912,20 @@ def main() -> None:
 
     # 打印核心指标
     logger.info("=== 评测完成，核心结果（含磁盘合并，共 %d 条）===", len(merged_results))
+    pt_tps = pure_target_result.tokens_per_sec if pure_target_result else None
+    if pt_tps:
+        logger.info("  [基准] pure_target 手写循环  acc=%.4f  tps=%.1f",
+                    pure_target_result.accuracy, pt_tps)
+        logger.info("  ─── 投机解码加速比（相对 pure_target 同框架）───")
     for r in sorted(merged_results, key=lambda x: x.accuracy, reverse=True):
         alpha_str = f"{r.alpha:.2f}" if r.alpha >= 0 else "N/A"
+        speedup_str = ""
+        if pt_tps and pt_tps > 0:
+            speedup_str = f"  speedup={r.tokens_per_sec/pt_tps:.2f}x"
         logger.info(
-            "  %-25s  α=%-5s  T=%.1f  acc=%.4f  tps=%.1f  acc_rate=%.3f",
-            r.strategy, alpha_str, r.t_sample, r.accuracy, r.tokens_per_sec, r.mean_acceptance_rate,
+            "  %-25s  α=%-5s  T=%.1f  acc=%.4f  tps=%.1f  acc_rate=%.3f%s",
+            r.strategy, alpha_str, r.t_sample, r.accuracy,
+            r.tokens_per_sec, r.mean_acceptance_rate, speedup_str,
         )
 
 
