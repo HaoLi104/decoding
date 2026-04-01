@@ -37,9 +37,12 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
+# 使用与 run_benchmark.py 完全相同的 prompt 格式
+from data_loader import format_prompt, load_medqa
+
 
 # ---------------------------------------------------------------------------
-# 答案抽取（与参考脚本 medqa_test_single_model_vllm(3).py 对齐）
+# 答案抽取（与 run_benchmark.py 对齐，搜索末尾 1500 字符）
 # ---------------------------------------------------------------------------
 
 _RE_THINK        = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -56,15 +59,7 @@ _RE_LASTLINE_LETTER_PUNCT = re.compile(r"^\s*(?:option\s*)?([A-D])\s*[.)]\s*$", 
 
 
 def extract_answer(response: str, tail_chars: int = 1500) -> str:
-    """从模型输出中抽取 A/B/C/D。
-
-    策略（与参考脚本保持一致）：
-    1. 剥离 <think>…</think> 块，避免从推理过程中误提取早期结论
-    2. 优先解析 <answer>…</answer> 标签内的内容
-    3. 否则只搜索末尾 tail_chars 字符，避免选项列举干扰
-    4. 多次匹配取最后一个（更接近最终答案）
-    5. 最终 fallback：检查末尾几行是否为单独字母
-    """
+    """从模型输出中抽取 A/B/C/D（与 run_benchmark.py 对齐）。"""
     if not response:
         return ""
     text  = _RE_THINK.sub("", response)
@@ -99,43 +94,16 @@ def load_model(model_path: str):
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
         trust_remote_code=True,
-        dtype=torch.bfloat16,           # bfloat16，符合规范
-        device_map="cuda:0",            # 严格单卡，符合规范
+        torch_dtype=torch.bfloat16,     # 注意：torch_dtype，不是 dtype
+        device_map="cuda:0",
     )
     model.eval()
     return tokenizer, model
 
 
-# ---------------------------------------------------------------------------
-# 构建 Prompt（使用 Qwen Chat Template）
-# ---------------------------------------------------------------------------
-
-SYSTEM_PROMPT = (
-    "You are a medical expert. Reason concisely in English. "
-    "Always end with a single line: 'Final answer: X' where X is A/B/C/D. "
-    "Do not add any text after that line."
-)
-
-
 def build_prompt(item: dict, tokenizer) -> str:
-    """将一条 MedQA 样本格式化为 Qwen Chat Template 格式的输入字符串。"""
-    question = item["question"]
-    options  = item["options"]   # {"A": "...", "B": "...", ...}
-
-    opts_text = "\n".join(f"{k}. {v}" for k, v in sorted(options.items()))
-    content = f"Question: {question}\n\nOptions:\n{opts_text}"
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",   "content": content},
-    ]
-    kwargs = {"tokenize": False, "add_generation_prompt": True}
-    try:
-        # 对支持 thinking 模式的 Qwen3 系列关闭 thinking，节省 token 预算
-        kwargs["enable_thinking"] = False
-    except Exception:
-        pass
-    return tokenizer.apply_chat_template(messages, **kwargs)
+    """使用 data_loader.format_prompt()，与 run_benchmark.py 完全相同的 prompt。"""
+    return format_prompt(tokenizer, item["question"], item["options"])
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +115,7 @@ def evaluate(
     tokenizer,
     dataset,
     max_new_tokens: int = 256,
-    batch_size: int = 4,
+    batch_size: int = 1,   # 严格 batch_size=1，避免 padding 导致准确率下降
 ) -> dict:
     device = next(model.parameters()).device
 
@@ -156,55 +124,45 @@ def evaluate(
     total_time   = 0.0
     results      = []
 
-    for start in tqdm(range(0, len(dataset), batch_size), desc="评测"):
-        # HF Dataset 切片返回列字典，需按行索引取出 dict 列表
-        end = min(start + batch_size, len(dataset))
-        batch_items = [dataset[i] for i in range(start, end)]
+    for idx in tqdm(range(len(dataset)), desc="评测"):
+        item = dataset[idx]
 
-        prompts = [build_prompt(item, tokenizer) for item in batch_items]
-        enc = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=2048,
-        )
-        input_ids      = enc["input_ids"].to(device)        # [B, L_in]
-        attention_mask = enc["attention_mask"].to(device)   # [B, L_in]
-        prompt_len     = input_ids.shape[1]
+        prompt_text = build_prompt(item, tokenizer)
+        enc = tokenizer(prompt_text, return_tensors="pt")
+        input_ids   = enc["input_ids"].to(device)      # [1, L_in]
+        prompt_len  = input_ids.shape[1]
 
         t0 = time.perf_counter()
         with torch.inference_mode():
             out_ids = model.generate(
                 input_ids,
-                attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
-                do_sample=False,          # 贪婪解码
+                do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
             )
         elapsed = time.perf_counter() - t0
 
-        # 只解码新生成的 token
-        gen_ids    = out_ids[:, prompt_len:]   # [B, L_gen]
-        gen_tokens = gen_ids.numel() - (gen_ids == tokenizer.eos_token_id).sum().item()
-        total_tokens += gen_tokens
+        gen_ids  = out_ids[0, prompt_len:]             # [L_gen]
+        gen_text = tokenizer.decode(gen_ids, skip_special_tokens=True)
+
+        # 统计 token 数（不含 eos）
+        n_gen = (gen_ids != tokenizer.eos_token_id).sum().item()
+        total_tokens += n_gen
         total_time   += elapsed
 
-        for i, item in enumerate(batch_items):
-            gen_text   = tokenizer.decode(gen_ids[i], skip_special_tokens=True)
-            pred       = extract_answer(gen_text)
-            # GBaker/MedQA-USMLE-4-options 的答案字段为 answer_idx（A/B/C/D）
-            gold       = str(item.get("answer_idx", item.get("answer", ""))).strip().upper()
-            is_correct = (pred == gold) and (pred != "")
+        pred = extract_answer(gen_text)
+        # GBaker/MedQA-USMLE-4-options 答案字段为 answer_idx（A/B/C/D）
+        gold = str(item.get("answer_idx", item.get("answer", ""))).strip().upper()
+        is_correct = (pred == gold) and (pred != "")
 
-            correct += int(is_correct)
-            results.append({
-                "question": item["question"][:120],
-                "gold":     gold,
-                "pred":     pred,
-                "correct":  is_correct,
-                "gen_text": gen_text[:400],
-            })
+        correct += int(is_correct)
+        results.append({
+            "question": item["question"][:120],
+            "gold":     gold,
+            "pred":     pred,
+            "correct":  is_correct,
+            "gen_text": gen_text[:400],
+        })
 
     n          = len(results)
     accuracy   = correct / n if n else 0.0
@@ -235,8 +193,6 @@ def main() -> None:
     parser.add_argument("--out",    required=True, help="结果 JSON 输出路径")
     args = parser.parse_args()
 
-    # 加载数据集（HuggingFace，无需本地文件）
-    from data_loader import load_medqa
     print(f"[加载数据集] MedQA-USMLE split={args.split} limit={args.limit}")
     dataset = load_medqa(split=args.split, limit=args.limit)
     print(f"  共 {len(dataset)} 条样本")
