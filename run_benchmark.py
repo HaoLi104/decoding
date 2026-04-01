@@ -33,7 +33,7 @@ import argparse
 import json
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -227,6 +227,40 @@ def _build_proposer(
 # ---------------------------------------------------------------------------
 # 单次配置完整评测
 # ---------------------------------------------------------------------------
+
+def _benchmark_result_merge_key(r: BenchmarkResult) -> tuple:
+    """用于合并多轮运行结果的去重键。"""
+    return (r.strategy, r.arch, float(r.alpha), float(r.t_sample))
+
+
+def load_per_config_summaries_from_disk(out_dir: Path) -> List[BenchmarkResult]:
+    """读取 out_dir 下所有单配置 summary（*_summary.json），不含 summary_table.json。"""
+    out: List[BenchmarkResult] = []
+    field_names = {f.name for f in fields(BenchmarkResult)}
+    for p in sorted(out_dir.glob("*_summary.json")):
+        if p.name == "summary_table.json":
+            continue
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            data = {k: v for k, v in raw.items() if k in field_names}
+            out.append(BenchmarkResult(**data))
+        except Exception as exc:
+            logger.warning("跳过损坏或非配置 summary: %s  err=%s", p.name, exc)
+    return out
+
+
+def merge_session_with_disk(
+    session: List[BenchmarkResult],
+    disk: List[BenchmarkResult],
+) -> List[BenchmarkResult]:
+    """并集：磁盘上已有配置 + 本轮结果；同一键以 session 为准（覆盖）。"""
+    by_key: Dict[tuple, BenchmarkResult] = {}
+    for r in disk:
+        by_key[_benchmark_result_merge_key(r)] = r
+    for r in session:
+        by_key[_benchmark_result_merge_key(r)] = r
+    return list(by_key.values())
+
 
 def _try_load_completed(config: DecodeConfig, out_dir: Path) -> Optional[BenchmarkResult]:
     """若该配置已完成（summary JSON 存在），直接加载并返回；否则返回 None。"""
@@ -589,6 +623,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no_compile", action="store_true",
         help="跳过 torch.compile（调试用）",
     )
+    p.add_argument(
+        "--aggregate_summaries_only",
+        action="store_true",
+        help="不加载模型；仅扫描 out_dir 内 *_summary.json 合并生成 summary_table.md / .json",
+    )
 
     return p
 
@@ -603,6 +642,22 @@ def main() -> None:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.aggregate_summaries_only:
+        merged = load_per_config_summaries_from_disk(out_dir)
+        if not merged:
+            logger.error("目录内无有效 *_summary.json: %s", out_dir)
+            return
+        summary_path = out_dir / "summary_table.md"
+        generate_summary_table(merged, summary_path)
+        logger.info("=== 仅聚合汇总，共 %d 条配置 ===", len(merged))
+        for r in sorted(merged, key=lambda x: x.accuracy, reverse=True):
+            alpha_str = f"{r.alpha:.2f}" if r.alpha >= 0 else "N/A"
+            logger.info(
+                "  %-25s  α=%-5s  T=%.1f  acc=%.4f  tps=%.1f  acc_rate=%.3f",
+                r.strategy, alpha_str, r.t_sample, r.accuracy, r.tokens_per_sec, r.mean_acceptance_rate,
+            )
+        return
 
     device = torch.device("cuda:0")
 
@@ -684,13 +739,17 @@ def main() -> None:
         out_dir=out_dir,
     )
 
+    # 与目录内已有单配置 summary 合并（续跑时 summary_table 含全部实验）
+    disk_summaries = load_per_config_summaries_from_disk(out_dir)
+    merged_results = merge_session_with_disk(all_results, disk_summaries)
+
     # 生成汇总表
     summary_path = out_dir / "summary_table.md"
-    generate_summary_table(all_results, summary_path)
+    generate_summary_table(merged_results, summary_path)
 
     # 打印核心指标
-    logger.info("=== 评测完成，核心结果 ===")
-    for r in sorted(all_results, key=lambda x: x.accuracy, reverse=True):
+    logger.info("=== 评测完成，核心结果（含磁盘合并，共 %d 条）===", len(merged_results))
+    for r in sorted(merged_results, key=lambda x: x.accuracy, reverse=True):
         alpha_str = f"{r.alpha:.2f}" if r.alpha >= 0 else "N/A"
         logger.info(
             "  %-25s  α=%-5s  T=%.1f  acc=%.4f  tps=%.1f  acc_rate=%.3f",
