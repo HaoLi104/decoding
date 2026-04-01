@@ -1,0 +1,65 @@
+### ==========================================================================
+### LLaMA-Factory 微调配置 — Qwen2.5-3B-Instruct → Qwen2.5-3B-Instruct-Law
+###
+### 实验设计：
+###   - 全参数微调（FFT），禁止 LoRA
+###   - 学习率 5e-6（< 1e-5，防止灾难性遗忘）
+###   - 训练 2 Epochs
+###   - 保留原生 Qwen Chat Template（qwen）
+###   - 训练数据来源：DISC-Law-SFT 司法考试/法律阅读理解子集 + Alpaca 通用锚点（25%）
+###
+### 运行方式见 scripts/run_finetune_law_3b.sh
+### ==========================================================================
+
+
+### --- 1. 模型设置 --- ###
+model_name_or_path: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct
+trust_remote_code: true
+stage: sft
+do_train: true
+finetuning_type: full          # 全参数微调（FFT），禁止使用 lora / qlora
+
+
+### --- 2. 数据集设置 --- ###
+# 需在 LLaMA-Factory/data/dataset_info.json 中注册 law_mix_train
+# 注册方式见 prepare_finetune_data_law.py 输出的提示
+dataset: law_mix_train
+template: qwen                 # Qwen2.5 使用 qwen 模板，必须与 Base 一致
+cutoff_len: 2048               # 法律文本可能较长；2048 在单卡 H200 下兼顾效率与覆盖
+val_size: 0.0                  # 验证集已在 prepare_finetune_data_law.py 中独立拆分
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+
+### --- 3. 训练核心参数 --- ###
+learning_rate: 5.0e-6
+num_train_epochs: 2            # 2 Epochs，与医疗版保持一致
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+
+### --- 4. 单卡 H200 批次设置 --- ###
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 4   # 全局 batch = 1卡 × 8 × 4 = 32
+bf16: true                        # 全程 bfloat16
+gradient_checkpointing: false     # H200 显存充裕，关闭以加速
+flash_attn: auto                  # auto 模式：有 flash-attn 则开启，否则静默 fallback
+
+
+### --- 5. 保存与日志 --- ###
+output_dir: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Law
+logging_steps: 20
+save_strategy: epoch             # 每个 epoch 保存一次
+save_total_limit: 2
+plot_loss: true
+report_to: none
+
+
+### --- 6. 评估（使用独立验证集文件，非训练集分割）--- ###
+# 如需在训练中评估，可追加：
+# eval_dataset: law_mix_val
+# eval_strategy: steps
+# eval_steps: 200

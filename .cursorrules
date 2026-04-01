@@ -17,8 +17,11 @@
 # 远端模型路径（H200 机器绝对路径）
 - Target（验收官，32B）：`/data/ocean/decoding/model/Qwen/Qwen2.5-32B-Instruct`
 - Base（常识对照组，3B，未微调）：`/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct`
-- Draft（提案者，3B，医学微调后）：`/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Medical`
-  - Draft 由 Base 经混合医学数据集全参微调（FFT）得到，脚本见 `train_medical_3b.yaml` + `prepare_finetune_data.py`
+- Draft-Medical（3B，医学微调）：`/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Medical`
+ - Draft-Medical 由 Base 经混合医学数据集全参微调（FFT）得到，脚本见 `train_medical_3b.yaml` + `prepare_finetune_data.py`
+- Draft-Law（3B，司法领域微调）：`/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Law`
+ - Draft-Law 由 Base 经 DISC-Law-SFT（司法考试+法律阅读理解子集）全参微调（FFT）得到，脚本见 `train_law_3b.yaml` + `prepare_finetune_data_law.py` + `scripts/run_finetune_law_3b.sh`
+ - 评测数据集：`hails/agieval-jec-qa-kd` + `hails/agieval-jec-qa-ca`（AGIEval JEC-QA，仅单选题），缓存路径 `/data/ocean/decoding/data/jecqa_cache/`
 - LLaMA-Factory 工作目录：`/data/ocean/decoding/LLaMA-Factory`（需在远端单独 clone）
 
 # GPU 与底层执行约束 (H200 单卡内聚架构)

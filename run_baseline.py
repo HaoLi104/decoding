@@ -1,28 +1,34 @@
 """
 单模型 Baseline 评测脚本
-评测 Target / Draft / Base 三个模型在 MedQA-USMLE 上的 Accuracy 与 Tokens/sec。
+支持 MedQA-USMLE 和 JEC-QA（中国司法考试）两个数据集。
 
 用法：
   conda activate kvner
   export CUDA_VISIBLE_DEVICES=1
 
-  # Draft-only (Medical-3B)
-  python run_baseline.py \\
-      --model /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Medical \\
-      --limit 200 \\
-      --out results/baseline/draft_only_medqa.json
-
-  # Base-only (原始 3B)
-  python run_baseline.py \\
-      --model /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct \\
-      --limit 200 \\
-      --out results/baseline/base_only_medqa.json
-
-  # Target-only (32B, 需要更多显存 -- 建议 CUDA_VISIBLE_DEVICES=0)
+  # MedQA — Target-only
   python run_baseline.py \\
       --model /data/ocean/decoding/model/Qwen/Qwen2.5-32B-Instruct \\
-      --limit 200 \\
-      --out results/baseline/target_only_medqa.json
+      --dataset medqa --limit 200 \\
+      --out results/baseline/target_only_medqa_200.json
+
+  # JEC-QA — Target-only（确认 32B 法律 baseline）
+  python run_baseline.py \\
+      --model /data/ocean/decoding/model/Qwen/Qwen2.5-32B-Instruct \\
+      --dataset jecqa --limit 200 \\
+      --out results/baseline/target_only_jecqa_200.json
+
+  # JEC-QA — Base-3B
+  python run_baseline.py \\
+      --model /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct \\
+      --dataset jecqa --limit 200 \\
+      --out results/baseline/base_only_jecqa_200.json
+
+  # JEC-QA — Draft-Law-3B（微调后）
+  python run_baseline.py \\
+      --model /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Law \\
+      --dataset jecqa --limit 200 \\
+      --out results/baseline/draft_law_jecqa_200.json
 """
 
 from __future__ import annotations
@@ -37,8 +43,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
-# 使用与 run_benchmark.py 完全相同的 prompt 格式
-from data_loader import format_prompt, load_medqa
+# 使用与 run_benchmark.py 完全相同的 prompt 格式与数据加载
+from data_loader import format_prompt, load_jecqa, load_medqa
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +107,9 @@ def load_model(model_path: str):
     return tokenizer, model
 
 
-def build_prompt(item: dict, tokenizer) -> str:
+def build_prompt(item: dict, tokenizer, dataset_name: str = "medqa") -> str:
     """使用 data_loader.format_prompt()，与 run_benchmark.py 完全相同的 prompt。"""
-    return format_prompt(tokenizer, item["question"], item["options"])
+    return format_prompt(tokenizer, item["question"], item["options"], dataset_name=dataset_name)
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +122,7 @@ def evaluate(
     dataset,
     max_new_tokens: int = 256,
     batch_size: int = 1,   # 严格 batch_size=1，避免 padding 导致准确率下降
+    dataset_name: str = "medqa",
 ) -> dict:
     device = next(model.parameters()).device
 
@@ -127,7 +134,7 @@ def evaluate(
     for idx in tqdm(range(len(dataset)), desc="评测"):
         item = dataset[idx]
 
-        prompt_text = build_prompt(item, tokenizer)
+        prompt_text = build_prompt(item, tokenizer, dataset_name=dataset_name)
         enc = tokenizer(prompt_text, return_tensors="pt")
         input_ids   = enc["input_ids"].to(device)      # [1, L_in]
         prompt_len  = input_ids.shape[1]
@@ -184,17 +191,23 @@ def evaluate(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="单模型 MedQA Baseline 评测")
-    parser.add_argument("--model",  required=True, help="模型路径")
-    parser.add_argument("--limit",  type=int, default=200, help="评测样本数")
-    parser.add_argument("--split",  default="test", choices=["train", "test"])
-    parser.add_argument("--batch_size",     type=int, default=4)
+    parser = argparse.ArgumentParser(description="单模型 Baseline 评测（MedQA / JEC-QA）")
+    parser.add_argument("--model",   required=True, help="模型路径")
+    parser.add_argument("--dataset", default="medqa", choices=["medqa", "jecqa"],
+                        help="评测数据集：medqa（默认）或 jecqa（中国司法考试）")
+    parser.add_argument("--limit",   type=int, default=200, help="评测样本数")
+    parser.add_argument("--split",   default="test", choices=["train", "test"])
+    parser.add_argument("--batch_size",     type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=256)
-    parser.add_argument("--out",    required=True, help="结果 JSON 输出路径")
+    parser.add_argument("--out",     required=True, help="结果 JSON 输出路径")
     args = parser.parse_args()
 
-    print(f"[加载数据集] MedQA-USMLE split={args.split} limit={args.limit}")
-    dataset = load_medqa(split=args.split, limit=args.limit)
+    if args.dataset == "jecqa":
+        print(f"[加载数据集] JEC-QA（AGIEval KD+CA，单选）limit={args.limit}")
+        dataset = load_jecqa(limit=args.limit)
+    else:
+        print(f"[加载数据集] MedQA-USMLE split={args.split} limit={args.limit}")
+        dataset = load_medqa(split=args.split, limit=args.limit)
     print(f"  共 {len(dataset)} 条样本")
 
     tokenizer, model = load_model(args.model)
@@ -204,11 +217,13 @@ def main() -> None:
         model, tokenizer, dataset,
         max_new_tokens=args.max_new_tokens,
         batch_size=args.batch_size,
+        dataset_name=args.dataset,
     )
 
     model_name = Path(args.model).name
-    result["model"] = model_name
+    result["model"]      = model_name
     result["model_path"] = args.model
+    result["dataset"]    = args.dataset
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,6 +233,7 @@ def main() -> None:
 
     print(f"\n{'='*50}")
     print(f"  模型:        {model_name}")
+    print(f"  数据集:      {args.dataset}")
     print(f"  样本数:      {result['n_cases']}")
     print(f"  Accuracy:    {result['accuracy']:.4f}  ({result['n_correct']}/{result['n_cases']})")
     print(f"  Tokens/sec:  {result['tokens_per_sec']:.1f}")

@@ -2,17 +2,28 @@
 数据加载与提示格式化模块
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 import re
 
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
-SYSTEM_PROMPT = (
-    "You are a medical expert. Reason concisely (within 3 sentences) in English. "
-    "Always end with a single line: 'Final answer: X' where X is A/B/C/D. "
-    "Do not add any text after that line."
-)
+# 各数据集对应的 system prompt
+SYSTEM_PROMPTS: Dict[str, str] = {
+    "medqa": (
+        "You are a medical expert. Reason concisely (within 3 sentences) in English. "
+        "Always end with a single line: 'Final answer: X' where X is A/B/C/D. "
+        "Do not add any text after that line."
+    ),
+    "jecqa": (
+        "你是一位中国法律专家。请用中文简洁推理（不超过3句话）。"
+        "最后一行必须且只能输出：'Final answer: X'，其中 X 是 A/B/C/D 之一。"
+        "最后一行之后不要输出任何文字。"
+    ),
+}
+
+# 向后兼容：默认 SYSTEM_PROMPT 指向 medqa
+SYSTEM_PROMPT = SYSTEM_PROMPTS["medqa"]
 
 
 def load_medqa(split: str = "validation", limit: int = 100):
@@ -36,6 +47,83 @@ def load_medmcqa(split: str = "validation", limit: int = 100):
     if limit:
         dataset = dataset.select(range(min(limit, len(dataset))))
     return dataset
+
+
+def load_jecqa(split: str = "test", limit: int = 0, cache_dir: str = "/data/ocean/decoding/data/jecqa_cache"):
+    """加载 AGIEval JEC-QA 数据集（KD + CA 合并），仅保留单选题。
+
+    来源：
+      hails/agieval-jec-qa-kd  (知识型, 1000 题)
+      hails/agieval-jec-qa-ca  (案例型, 999 题)
+
+    原始字段：
+      query   (str):        题干（含选项，如 "问题...\\n(A) ... (B) ... "）
+      choices (list[str]):  4 个选项，格式为 "(A) ..." "(B) ..." 等
+      gold    (list[int]):  正确选项下标列表，单选题 gold=[k]，多选 gold=[i,j,...]
+
+    转换后统一输出 dict，字段与 MedQA pipeline 完全一致：
+      question   (str):  题干（不含选项）
+      options    (dict): {"A": "...", "B": "...", "C": "...", "D": "..."}
+      answer_idx (str):  正确选项字母 A/B/C/D
+
+    过滤规则：
+      - 只保留 len(gold) == 1 的单选题（与 MedQA 评测口径一致）
+      - 过滤 choices 数量 != 4 的题目
+    """
+    import os
+    from datasets import Dataset, concatenate_datasets
+
+    _KD_ID = "hails/agieval-jec-qa-kd"
+    _CA_ID = "hails/agieval-jec-qa-ca"
+
+    # AGIEval 版本只有 test split
+    kd = load_dataset(_KD_ID, split="test", cache_dir=cache_dir)
+    ca = load_dataset(_CA_ID, split="test", cache_dir=cache_dir)
+    raw = concatenate_datasets([kd, ca])
+
+    _letter = ["A", "B", "C", "D"]
+    _prefix_re = re.compile(r"^\([A-D]\)\s*")  # 剥离 "(A) " 等前缀
+
+    def _strip_query_options(query: str) -> str:
+        """从 query 字段中去掉末尾选项行，只保留题干部分。"""
+        lines = query.strip().splitlines()
+        # 选项行通常以 (A) / (B) / (C) / (D) 开头
+        option_start = None
+        for i, line in enumerate(lines):
+            if re.match(r"^\([A-D]\)", line.strip()):
+                option_start = i
+                break
+        if option_start is not None:
+            return "\n".join(lines[:option_start]).strip()
+        return query.strip()
+
+    rows = []
+    for item in raw:
+        gold = item.get("gold", [])
+        choices = item.get("choices", [])
+
+        # 只保留单选且恰好 4 个选项
+        if len(gold) != 1 or len(choices) != 4:
+            continue
+
+        answer_idx = _letter[gold[0]]
+        options = {
+            _letter[i]: _prefix_re.sub("", c).strip()
+            for i, c in enumerate(choices)
+        }
+        question = _strip_query_options(item.get("query", ""))
+        if not question:
+            continue
+
+        rows.append({
+            "question":   question,
+            "options":    options,
+            "answer_idx": answer_idx,
+        })
+        if limit and len(rows) >= limit:
+            break
+
+    return Dataset.from_list(rows)
 
 
 def load_mmlu(subject: str, split: str = "test", limit: int = 100):
@@ -195,12 +283,22 @@ def load_medreason_mc(split: str = "train", limit: int = 200):
     return Dataset.from_list(rows)
 
 
-def format_prompt(tokenizer: AutoTokenizer, question: str, options) -> str:
-    """将题目与选项格式化为 Llama-3 chat 模板字符串
+def format_prompt(
+    tokenizer: AutoTokenizer,
+    question: str,
+    options,
+    dataset_name: str = "medqa",
+) -> str:
+    """将题目与选项格式化为 Qwen Chat 模板字符串。
 
-    options 可能是 list 或 dict（如 {'A': 'xxx', 'B': 'yyy'}）。
+    Args:
+        tokenizer:    用于 apply_chat_template
+        question:     题干文本
+        options:      list[str] 或 dict {"A": ..., "B": ...}
+        dataset_name: "medqa" 或 "jecqa"，决定 system prompt 与用户引导语
+
+    向后兼容：默认 dataset_name="medqa"，行为与旧版完全一致。
     """
-
     # 规范化选项文本
     opt_lines: List[str] = []
     if isinstance(options, dict):
@@ -208,21 +306,34 @@ def format_prompt(tokenizer: AutoTokenizer, question: str, options) -> str:
             val = str(options[key]).strip()
             opt_lines.append(f"{key}. {val}")
     else:
-        # 默认按顺序映射到 A/B/C/D...
         opt_lines = [f"{chr(65+i)}. {str(opt).strip()}" for i, opt in enumerate(list(options))]
 
-    user_content = (
-        question.strip()
-        + "\n"
-        + "\n".join(opt_lines)
-        + "\n\nBefore the final answer, repeat the chosen option text exactly once. "
-        + "Answer format: after reasoning, output the chosen option text, "
-        + "then end with exactly one line in the form 'Final answer: X' "
-        + "where X is one of A/B/C/D. No text is allowed after that line."
-    )
+    sys_prompt = SYSTEM_PROMPTS.get(dataset_name, SYSTEM_PROMPT)
+
+    if dataset_name == "jecqa":
+        user_content = (
+            question.strip()
+            + "\n"
+            + "\n".join(opt_lines)
+            + "\n\n在最终答案之前，请将所选选项的文字重复一遍。"
+            + "格式：推理后输出所选选项的完整文字，"
+            + "然后最后一行必须且只能是 'Final answer: X'，X 为 A/B/C/D 之一。"
+            + "最后一行之后不要输出任何文字。"
+        )
+    else:
+        user_content = (
+            question.strip()
+            + "\n"
+            + "\n".join(opt_lines)
+            + "\n\nBefore the final answer, repeat the chosen option text exactly once. "
+            + "Answer format: after reasoning, output the chosen option text, "
+            + "then end with exactly one line in the form 'Final answer: X' "
+            + "where X is one of A/B/C/D. No text is allowed after that line."
+        )
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_content},
+        {"role": "system", "content": sys_prompt},
+        {"role": "user",   "content": user_content},
     ]
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 

@@ -53,7 +53,7 @@ from config_v2 import (
     ModelPaths,
     StrategyType,
 )
-from data_loader import format_prompt, load_medqa
+from data_loader import format_prompt, load_jecqa, load_medqa
 from decode_loop import DecodeResult, SpeculativeDecodeLoop
 from dual_stream_engine import DualStreamProposer
 from engine_state import TriModelOrchestrator
@@ -139,6 +139,23 @@ def _load_dataset(dataset_name: str, limit: int, split: str = "test") -> List[Di
             })
         return cases[:limit]
 
+    elif dataset_name == "jecqa":
+        raw_ds = load_jecqa(limit=limit)
+        cases = []
+        for idx, item in enumerate(raw_ds):
+            q    = item.get("question", "")
+            opts = item.get("options", {})
+            gt   = str(item.get("answer_idx", "")).strip().upper()
+            if not q or not opts or gt not in {"A", "B", "C", "D"}:
+                continue
+            cases.append({
+                "id":       str(idx),
+                "question": q,
+                "options":  opts,
+                "gt":       gt,
+            })
+        return cases[:limit]
+
     elif dataset_name == "gsm8k":
         from datasets import load_dataset as hf_load_dataset
         ds = hf_load_dataset("gsm8k", "main", split=split)
@@ -160,8 +177,8 @@ def _load_dataset(dataset_name: str, limit: int, split: str = "test") -> List[Di
 
 def _format_prompt(item: Dict[str, Any], tokenizer, dataset_name: str) -> str:
     """将样本格式化为 prompt 字符串。"""
-    if dataset_name == "medqa":
-        return format_prompt(tokenizer, item["question"], item["options"])
+    if dataset_name in {"medqa", "jecqa"}:
+        return format_prompt(tokenizer, item["question"], item["options"], dataset_name=dataset_name)
     elif dataset_name == "gsm8k":
         return (
             f"<|im_start|>system\nYou are a math problem solver. "
@@ -717,7 +734,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
 
     # 数据集
-    p.add_argument("--dataset", choices=["medqa", "gsm8k"], default="medqa")
+    p.add_argument("--dataset", choices=["medqa", "jecqa", "gsm8k"], default="medqa")
     p.add_argument("--split",   default="test")
     p.add_argument("--limit",   type=int, default=300)
 
