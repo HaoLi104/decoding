@@ -51,6 +51,7 @@ flash_attn: auto                  # auto 模式：有 flash-attn 则开启，否
 
 ### --- 5. 保存与日志 --- ###
 output_dir: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Law
+overwrite_output_dir: true       # 强制从头开始，不自动 resume checkpoint（避免旧 checkpoint 的 optimizer state 兼容性问题）
 logging_steps: 20
 save_strategy: epoch             # 每个 epoch 保存一次
 save_total_limit: 2
