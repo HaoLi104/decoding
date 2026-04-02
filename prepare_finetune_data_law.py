@@ -134,6 +134,49 @@ def _is_mcq_input(text: str) -> bool:
 # 数据集加载
 # ---------------------------------------------------------------------------
 
+def load_jecqa_mcq_for_training(
+    eval_limit: int = 200,
+    train_limit: int = 1600,
+) -> List[Dict[str, Any]]:
+    """加载 JEC-QA 非评测样本，转换为 MCQ alpaca 格式训练数据。
+
+    数据划分原则（避免数据泄露）：
+      - 评测集：前 eval_limit 条（由 run_baseline.py / run_benchmark.py 使用）
+      - 训练集：从第 eval_limit+1 条开始，最多取 train_limit 条
+
+    输出格式：
+      instruction: MCQ 系统指令（与评测时 format_prompt 完全一致）
+      input:       题目 + A/B/C/D 选项（与评测 prompt 对齐）
+      output:      "Final answer: X"（仅格式行，简洁高效）
+    """
+    import sys
+    sys.path.insert(0, "/data/ocean/decoding")
+    from data_loader import load_jecqa
+
+    print("  正在加载 JEC-QA 训练集（跳过评测前 {e} 条，取后续 {t} 条）...".format(
+        e=eval_limit, t=train_limit
+    ))
+    ds = load_jecqa(offset=eval_limit, limit=train_limit)
+    print("  加载到 {n} 条 JEC-QA 非评测 MCQ 样本".format(n=len(ds)))
+
+    records = []
+    for item in ds:
+        q      = item["question"]
+        opts   = item["options"]   # {"A": "...", "B": "...", ...}
+        answer = item["answer_idx"]
+
+        opt_text   = "\n".join("{k}. {v}".format(k=k, v=v) for k, v in sorted(opts.items()))
+        input_text = "{q}\n{o}".format(q=q, o=opt_text)
+
+        records.append({
+            "instruction": _MCQ_SYSTEM_INSTRUCTION,
+            "input":       input_text,
+            "output":      "Final answer: " + answer,
+        })
+
+    return records
+
+
 def load_disc_law_sft(limit: int) -> List[Dict[str, Any]]:
     """加载 ShengbinYue/DISC-Law-SFT (仅 Pair 子集)，转换为 alpaca 格式。
 
@@ -260,12 +303,20 @@ def main() -> None:
         help="输出目录（会自动创建）",
     )
     parser.add_argument(
-        "--law_limit", type=int, default=15000,
-        help="法律领域数据最大样本数（含司法考试+法律阅读理解+法律问答）",
+        "--jecqa_eval_limit", type=int, default=200,
+        help="评测集样本数（跳过这部分，从其后抽取训练集）",
     )
     parser.add_argument(
-        "--general_ratio", type=float, default=0.25,
-        help="通用数据占总样本比例（0~1），默认 0.25",
+        "--jecqa_train_limit", type=int, default=1600,
+        help="从 JEC-QA 非评测样本中最多取多少条作为 MCQ 训练数据",
+    )
+    parser.add_argument(
+        "--law_freetext_limit", type=int, default=2500,
+        help="从 DISC-Law-SFT 取多少条自由文本样本作为法律知识注入",
+    )
+    parser.add_argument(
+        "--general_ratio", type=float, default=0.2,
+        help="Alpaca 通用数据占总样本比例（0~1），默认 0.2",
     )
     parser.add_argument(
         "--val_size", type=float, default=0.05,
@@ -278,27 +329,43 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # -------------------------------------------------------------------
-    # Step 1: 加载法律数据（75%）
+    # Step 1a: JEC-QA MCQ 训练样本（核心：格式 + 领域对齐）
     # -------------------------------------------------------------------
-    print("[1/4] 加载 ShengbinYue/DISC-Law-SFT  law_limit={lim}".format(lim=args.law_limit))
-    law_records = load_disc_law_sft(limit=args.law_limit)
-    print("      法律领域样本数: {n}".format(n=len(law_records)))
+    print("[1a/4] 加载 JEC-QA MCQ 训练样本（eval 后 {n} 条）".format(n=args.jecqa_train_limit))
+    jecqa_records = load_jecqa_mcq_for_training(
+        eval_limit=args.jecqa_eval_limit,
+        train_limit=args.jecqa_train_limit,
+    )
+    print("       JEC-QA MCQ 样本数: {n}".format(n=len(jecqa_records)))
 
     # -------------------------------------------------------------------
-    # Step 2: 按比例计算通用数据量（25%）
-    # general / (law + general) = general_ratio
-    # => general = law * general_ratio / (1 - general_ratio)
+    # Step 1b: DISC-Law-SFT 自由文本（法律知识注入）
+    # -------------------------------------------------------------------
+    print("[1b/4] 加载 DISC-Law-SFT 自由文本  limit={lim}".format(lim=args.law_freetext_limit))
+    law_records = load_disc_law_sft(limit=args.law_freetext_limit)
+    print("       DISC-Law-SFT 自由文本样本数: {n}".format(n=len(law_records)))
+
+    combined_law = jecqa_records + law_records
+    print("       法律数据总计: {n}（MCQ {mcq} + 自由文本 {ft}）".format(
+        n=len(combined_law), mcq=len(jecqa_records), ft=len(law_records)
+    ))
+
+    # -------------------------------------------------------------------
+    # Step 2: Alpaca 通用格式锚点
+    # general / (combined_law + general) = general_ratio
     # -------------------------------------------------------------------
     general_limit = int(
-        len(law_records) * args.general_ratio / max(1 - args.general_ratio, 1e-9)
+        len(combined_law) * args.general_ratio / max(1 - args.general_ratio, 1e-9)
     )
     print("[2/4] 加载 tatsu-lab/alpaca（通用格式锚点）  limit={lim}".format(lim=general_limit))
     general_records = load_general_alpaca(limit=general_limit)
     print("      通用样本数: {n}".format(n=len(general_records)))
 
-    actual_ratio = len(general_records) / max(len(law_records) + len(general_records), 1)
-    print("      实际混合比例: 法律={law:.1%}  通用={gen:.1%}".format(
-        law=1 - actual_ratio, gen=actual_ratio
+    total = len(combined_law) + len(general_records)
+    print("      实际混合比例: MCQ={mcq:.1%}  自由文本={ft:.1%}  通用={gen:.1%}".format(
+        mcq=len(jecqa_records)/total,
+        ft=len(law_records)/total,
+        gen=len(general_records)/total,
     ))
 
     # -------------------------------------------------------------------
@@ -306,7 +373,7 @@ def main() -> None:
     # -------------------------------------------------------------------
     print("[3/4] 混合打乱，分割训练/验证集（val_size={vs}）".format(vs=args.val_size))
     train_records, val_records = mix_and_split(
-        law_records=law_records,
+        law_records=combined_law,
         general_records=general_records,
         val_size=args.val_size,
         seed=args.seed,

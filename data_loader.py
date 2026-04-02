@@ -53,7 +53,7 @@ def load_medmcqa(split: str = "validation", limit: int = 100):
     return dataset
 
 
-def load_jecqa(split: str = "test", limit: int = 0, cache_dir: str = "/data/ocean/decoding/data/jecqa_cache"):
+def load_jecqa(split: str = "test", limit: int = 0, offset: int = 0, cache_dir: str = "/data/ocean/decoding/data/jecqa_cache"):
     """加载 AGIEval JEC-QA 数据集（KD + CA 合并），仅保留单选题。
 
     来源：
@@ -105,7 +105,7 @@ def load_jecqa(split: str = "test", limit: int = 0, cache_dir: str = "/data/ocea
             return "\n".join(lines[:option_start]).strip()
         return query.strip()
 
-    rows = []
+    all_rows = []
     for item in raw:
         gold = item.get("gold", [])
         choices = item.get("choices", [])
@@ -123,15 +123,19 @@ def load_jecqa(split: str = "test", limit: int = 0, cache_dir: str = "/data/ocea
         if not question:
             continue
 
-        rows.append({
+        all_rows.append({
             "question":   question,
             "options":    options,
             "answer_idx": answer_idx,
         })
-        if limit and len(rows) >= limit:
-            break
 
-    return Dataset.from_list(rows)
+    # 先 offset 跳过头部样本（用于训练集划分，避免与评测集重叠）
+    if offset > 0:
+        all_rows = all_rows[offset:]
+    if limit and len(all_rows) > limit:
+        all_rows = all_rows[:limit]
+
+    return Dataset.from_list(all_rows)
 
 
 def load_mmlu(subject: str, split: str = "test", limit: int = 100):

@@ -66,11 +66,13 @@ if [[ "${SKIP_DATA_PREP}" == "false" ]]; then
     echo "========== Step 1: 准备法律混合训练数据 =========="
     cd "${WORK_DIR}"
     python prepare_finetune_data_law.py \
-        --out_dir         "${DATA_DIR}" \
-        --law_limit       15000 \
-        --general_ratio   0.25 \
-        --val_size        0.05 \
-        --seed            42 \
+        --out_dir              "${DATA_DIR}" \
+        --jecqa_eval_limit     200 \
+        --jecqa_train_limit    1600 \
+        --law_freetext_limit   2500 \
+        --general_ratio        0.2 \
+        --val_size             0.05 \
+        --seed                 42 \
         2>&1 | tee "${LOG_DIR}/data_prep.log"
     echo "数据准备完成，日志: ${LOG_DIR}/data_prep.log"
 else
