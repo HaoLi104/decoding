@@ -65,11 +65,56 @@ _TARGET_TYPES = [
 ]
 
 # 系统指令前缀
-_LAW_SYSTEM_INSTRUCTION = (
+_MCQ_SYSTEM_INSTRUCTION = (
     "你是一位专业的中国法律助手，擅长司法考试、法律条文解读与法律问答。"
-    "请根据问题，提供准确、简洁的法律解答。"
-    "如果题目是选择题，请在最后一行输出 'Final answer: X'，其中 X 为 A/B/C/D 之一。"
+    "请根据问题，提供准确、简洁的中文法律解答。"
+    "最后一行必须且只能输出：'Final answer: X'，其中 X 为 A/B/C/D 之一。"
+    "最后一行之后不要输出任何文字。"
 )
+
+_FREETEXT_SYSTEM_INSTRUCTION = (
+    "你是一位专业的中国法律助手，擅长司法考试、法律条文解读与法律问答。"
+    "请根据问题，提供准确、简洁的中文法律解答。"
+)
+
+# ---------------------------------------------------------------------------
+# 辅助函数：从 DISC-Law-SFT 司法考试输出中提取答案字母
+# ---------------------------------------------------------------------------
+import re as _re
+
+def _extract_answer_letter(text: str):
+    """从中文法律推理文本中提取答案字母 A/B/C/D。
+
+    DISC-Law-SFT 司法考试子集的 output 格式示例：
+      "本题考查...根据《合同法》第X条，...因此答案选A。"
+      "综上所述，故选B。"
+      "正确答案为C，理由是..."
+
+    Returns:
+      str | None — 找到则返回大写字母，否则返回 None
+    """
+    patterns = [
+        r'答案[为是：:\s]*([ABCD])[^A-Z]',
+        r'故选\s*([ABCD])',
+        r'应选\s*([ABCD])',
+        r'选\s*([ABCD])[。，\s]',
+        r'正确[选项答案]+[为是：:\s]+([ABCD])',
+        r'本题[选答案]+[为是：:\s]*([ABCD])',
+        r'选择\s*([ABCD])',
+        r'综上[，,][^。]*选\s*([ABCD])',
+        # 末尾孤立字母（最后防线）
+        r'([ABCD])[。.）)]\s*$',
+    ]
+    for pat in patterns:
+        m = _re.search(pat, text)
+        if m:
+            return m.group(1).upper()
+    return None
+
+
+def _is_mcq_input(text: str) -> bool:
+    """检测输入是否为选择题格式（含 (A)/(B)/(C)/(D) 选项）。"""
+    return bool(_re.search(r'[（(][ABCD][）)]|\b[ABCD][.、．]\s', text))
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +151,9 @@ def load_disc_law_sft(limit: int) -> List[Dict[str, Any]]:
             cache_dir="/data/ocean/decoding/data/disc_law_cache",
         )
 
+    # 各子集统计
+    mcq_ok = mcq_skip = 0  # 司法考试 MCQ 样本
+
     # 按优先类型分桶
     buckets: Dict[str, List[Dict]] = {t: [] for t in _TARGET_TYPES}
     overflow: List[Dict] = []
@@ -118,11 +166,39 @@ def load_disc_law_sft(limit: int) -> List[Dict[str, Any]]:
         if not inp or not output:
             continue
 
-        record = {
-            "instruction": _LAW_SYSTEM_INSTRUCTION,
-            "input":       inp,
-            "output":      output,
-        }
+        # ---------------------------------------------------------------
+        # 司法考试子集：强制 "Final answer: X" 格式
+        #   1. 若 input 包含 ABCD 选项 → MCQ，提取答案字母后追加格式
+        #   2. 若无法提取答案 → 跳过该样本（避免错误格式污染训练集）
+        # ---------------------------------------------------------------
+        if item_type == "司法考试":
+            if _is_mcq_input(inp):
+                letter = _extract_answer_letter(output)
+                if letter is None:
+                    mcq_skip += 1
+                    continue  # 无法确定答案，跳过
+                mcq_ok += 1
+                # 保留原始推理文本，末尾追加标准格式行
+                formatted_output = output.rstrip() + "\nFinal answer: " + letter
+                record = {
+                    "instruction": _MCQ_SYSTEM_INSTRUCTION,
+                    "input":       inp,
+                    "output":      formatted_output,
+                }
+            else:
+                # 非 MCQ 格式的司法考试题（开放式问答），当通用法律知识使用
+                record = {
+                    "instruction": _FREETEXT_SYSTEM_INSTRUCTION,
+                    "input":       inp,
+                    "output":      output,
+                }
+        else:
+            # 其他子集（法律阅读理解、法律问答等）：保持原格式
+            record = {
+                "instruction": _FREETEXT_SYSTEM_INSTRUCTION,
+                "input":       inp,
+                "output":      output,
+            }
 
         if item_type in buckets:
             buckets[item_type].append(record)
@@ -140,9 +216,12 @@ def load_disc_law_sft(limit: int) -> List[Dict[str, Any]]:
 
     print("  DISC-Law-SFT 各子集样本数：")
     for t, bucket in buckets.items():
-        print(f"    {t}: {len(bucket)}")
-    print(f"  其他类型 (overflow): {len(overflow)}")
-    print(f"  合并后取前 {limit} 条: {min(len(merged), limit)} 条")
+        print("    {t}: {n}".format(t=t, n=len(bucket)))
+    print("  其他类型 (overflow): {n}".format(n=len(overflow)))
+    print("  合并后取前 {limit} 条: {n} 条".format(limit=limit, n=min(len(merged), limit)))
+    print("  [司法考试 MCQ] 成功提取答案: {ok}  跳过(无法提取): {skip}".format(
+        ok=mcq_ok, skip=mcq_skip
+    ))
 
     random.seed(0)
     random.shuffle(merged)
