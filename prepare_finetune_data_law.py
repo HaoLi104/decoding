@@ -85,25 +85,28 @@ import re as _re
 def _extract_answer_letter(text: str):
     """从中文法律推理文本中提取答案字母 A/B/C/D。
 
-    DISC-Law-SFT 司法考试子集的 output 格式示例：
-      "本题考查...根据《合同法》第X条，...因此答案选A。"
-      "综上所述，故选B。"
-      "正确答案为C，理由是..."
+    DISC-Law-SFT 司法考试 output 常见格式：
+      "...因此答案选A。"  /  "故选B"  /  "正确答案为C"  /  "答案：D"
+      "选项A是正确的"    /  末尾孤立字母 "...综上，A"
 
     Returns:
       str | None — 找到则返回大写字母，否则返回 None
     """
     patterns = [
-        r'答案[为是：:\s]*([ABCD])[^A-Z]',
+        r'答案[选为是：:\s]*([ABCD])[^A-Z]',
+        r'答案[选为是：:\s]*([ABCD])$',
         r'故选\s*([ABCD])',
         r'应选\s*([ABCD])',
-        r'选\s*([ABCD])[。，\s]',
-        r'正确[选项答案]+[为是：:\s]+([ABCD])',
-        r'本题[选答案]+[为是：:\s]*([ABCD])',
+        r'选\s*([ABCD])[。，；\s]',
+        r'正确[选项答案]+[选为是：:\s]+([ABCD])',
+        r'本题[选答案]+[选为是：:\s]*([ABCD])',
         r'选择\s*([ABCD])',
-        r'综上[，,][^。]*选\s*([ABCD])',
-        # 末尾孤立字母（最后防线）
-        r'([ABCD])[。.）)]\s*$',
+        r'综上[，,][^。\n]*选\s*([ABCD])',
+        r'选项\s*([ABCD])\s*(?:正确|是对的|为正确)',
+        r'([ABCD])\s*(?:正确|为正确答案)',
+        # 末尾孤立字母（最后防线，仅在 output 非常短时有效）
+        r'^\s*([ABCD])\s*$',
+        r'([ABCD])[。.）)\s]*$',
     ]
     for pat in patterns:
         m = _re.search(pat, text)
@@ -112,9 +115,19 @@ def _extract_answer_letter(text: str):
     return None
 
 
+# 多行 MCQ 选项检测：匹配 A. / A、/ （A）/ A） 等格式（行首或换行后）
+_MCQ_RE = _re.compile(
+    r'(?:^|\n)\s*[（(]?[A-D][.、．）)。]\s*\S',
+    _re.MULTILINE,
+)
+
 def _is_mcq_input(text: str) -> bool:
-    """检测输入是否为选择题格式（含 (A)/(B)/(C)/(D) 选项）。"""
-    return bool(_re.search(r'[（(][ABCD][）)]|\b[ABCD][.、．]\s', text))
+    """检测输入是否含有 A/B/C/D 四选项（MCQ 格式）。
+
+    匹配以下常见格式（行首或换行后）：
+      A. 选项    A、选项    A） 选项    （A）选项    A。选项
+    """
+    return bool(_MCQ_RE.search(text))
 
 
 # ---------------------------------------------------------------------------
@@ -122,110 +135,73 @@ def _is_mcq_input(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def load_disc_law_sft(limit: int) -> List[Dict[str, Any]]:
-    """加载 ShengbinYue/DISC-Law-SFT，提取司法考试相关子集，转换为 alpaca 格式。
+    """加载 ShengbinYue/DISC-Law-SFT (仅 Pair 子集)，转换为 alpaca 格式。
 
-    优先加载 _TARGET_TYPES 中的子集；若样本不足 limit，则扩展到其余子集。
-
-    转换逻辑：
-      - instruction: 统一用 _LAW_SYSTEM_INSTRUCTION
-      - input:       item["input"]（原始用户问题）
-      - output:      item["output"]（原始助手回答）
-        - 若回答中包含 "(A)"/"(B)" 等选项且有明确选项提及，尝试提取并追加 "Final answer: X"
+    关键设计决策（根据实际数据诊断结果）：
+      1. 只加载 DISC-Law-SFT-Pair.jsonl：避免 Triplet 文件的 schema 冲突
+         （Triplet 有额外 reference 字段，混合加载会报 DatasetGenerationCastError）
+      2. DISC-Law-SFT 实际没有 type 字段，改用内容检测 MCQ 格式
+      3. MCQ 样本：提取答案字母，末尾追加 "Final answer: X"（对齐评测格式）
+      4. 自由文本样本：保留原始输出（注入法律领域知识）
     """
     from datasets import load_dataset
 
-    print("  正在加载 ShengbinYue/DISC-Law-SFT ...")
-    # DISC-Law-SFT 以 JSONL 形式存储，直接加载 train split
-    try:
-        ds = load_dataset(
-            "ShengbinYue/DISC-Law-SFT",
-            split="train",
-            cache_dir="/data/ocean/decoding/data/disc_law_cache",
-        )
-    except Exception as exc:
-        print(f"  [警告] 无法直接加载 DISC-Law-SFT，尝试 data_files 方式: {exc}")
-        ds = load_dataset(
-            "ShengbinYue/DISC-Law-SFT",
-            data_files="DISC-Law-SFT-Pair.jsonl",
-            split="train",
-            cache_dir="/data/ocean/decoding/data/disc_law_cache",
-        )
+    print("  正在加载 ShengbinYue/DISC-Law-SFT (仅 DISC-Law-SFT-Pair.jsonl) ...")
+    ds = load_dataset(
+        "ShengbinYue/DISC-Law-SFT",
+        data_files={"train": "DISC-Law-SFT-Pair.jsonl"},
+        split="train",
+        cache_dir="/data/ocean/decoding/data/disc_law_cache",
+        verification_mode="no_checks",
+    )
 
-    # 各子集统计
-    mcq_ok = mcq_skip = 0  # 司法考试 MCQ 样本
+    mcq_ok = 0    # MCQ 样本：成功提取答案并格式化
+    mcq_skip = 0  # MCQ 样本：无法提取答案（跳过）
+    freetext = 0  # 自由文本样本
 
-    # 按优先类型分桶
-    buckets: Dict[str, List[Dict]] = {t: [] for t in _TARGET_TYPES}
-    overflow: List[Dict] = []
+    records: List[Dict] = []
 
     for item in ds:
-        item_type = str(item.get("type", "")).strip()
-        inp    = str(item.get("input", "")).strip()
+        inp    = str(item.get("input",  "")).strip()
         output = str(item.get("output", "")).strip()
 
         if not inp or not output:
             continue
 
-        # ---------------------------------------------------------------
-        # 司法考试子集：强制 "Final answer: X" 格式
-        #   1. 若 input 包含 ABCD 选项 → MCQ，提取答案字母后追加格式
-        #   2. 若无法提取答案 → 跳过该样本（避免错误格式污染训练集）
-        # ---------------------------------------------------------------
-        if item_type == "司法考试":
-            if _is_mcq_input(inp):
-                letter = _extract_answer_letter(output)
-                if letter is None:
-                    mcq_skip += 1
-                    continue  # 无法确定答案，跳过
-                mcq_ok += 1
-                # 保留原始推理文本，末尾追加标准格式行
-                formatted_output = output.rstrip() + "\nFinal answer: " + letter
-                record = {
-                    "instruction": _MCQ_SYSTEM_INSTRUCTION,
-                    "input":       inp,
-                    "output":      formatted_output,
-                }
-            else:
-                # 非 MCQ 格式的司法考试题（开放式问答），当通用法律知识使用
-                record = {
-                    "instruction": _FREETEXT_SYSTEM_INSTRUCTION,
-                    "input":       inp,
-                    "output":      output,
-                }
+        if _is_mcq_input(inp):
+            # MCQ：提取答案字母，末尾追加标准格式行
+            letter = _extract_answer_letter(output)
+            if letter is None:
+                mcq_skip += 1
+                # 无法确定答案 → 跳过，避免错误格式污染训练集
+                continue
+            mcq_ok += 1
+            records.append({
+                "instruction": _MCQ_SYSTEM_INSTRUCTION,
+                "input":       inp,
+                "output":      output.rstrip() + "\nFinal answer: " + letter,
+            })
         else:
-            # 其他子集（法律阅读理解、法律问答等）：保持原格式
-            record = {
+            # 自由文本：法律知识注入，不要求 Final answer 格式
+            freetext += 1
+            records.append({
                 "instruction": _FREETEXT_SYSTEM_INSTRUCTION,
                 "input":       inp,
                 "output":      output,
-            }
+            })
 
-        if item_type in buckets:
-            buckets[item_type].append(record)
-        else:
-            overflow.append(record)
-
-    # 按优先级合并，直到满足 limit
-    merged: List[Dict] = []
-    for t in _TARGET_TYPES:
-        merged.extend(buckets[t])
-        if len(merged) >= limit:
+        if len(records) >= limit:
             break
-    if len(merged) < limit:
-        merged.extend(overflow[:limit - len(merged)])
 
-    print("  DISC-Law-SFT 各子集样本数：")
-    for t, bucket in buckets.items():
-        print("    {t}: {n}".format(t=t, n=len(bucket)))
-    print("  其他类型 (overflow): {n}".format(n=len(overflow)))
-    print("  合并后取前 {limit} 条: {n} 条".format(limit=limit, n=min(len(merged), limit)))
-    print("  [司法考试 MCQ] 成功提取答案: {ok}  跳过(无法提取): {skip}".format(
+    print("  [MCQ] 成功提取答案: {ok}  跳过(无法提取): {skip}".format(
         ok=mcq_ok, skip=mcq_skip
     ))
+    print("  [自由文本] 法律知识样本: {n}".format(n=freetext))
+    print("  合并后共: {n} 条".format(n=len(records)))
 
     random.seed(0)
-    random.shuffle(merged)
-    return merged[:limit]
+    random.shuffle(records)
+    return records[:limit]
 
 
 def load_general_alpaca(limit: int) -> List[Dict[str, Any]]:
