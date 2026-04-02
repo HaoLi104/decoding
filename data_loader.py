@@ -81,8 +81,12 @@ def load_jecqa(split: str = "test", limit: int = 0, cache_dir: str = "/data/ocea
     _CA_ID = "hails/agieval-jec-qa-ca"
 
     # AGIEval 版本只有 test split
-    kd = load_dataset(_KD_ID, split="test", cache_dir=cache_dir)
-    ca = load_dataset(_CA_ID, split="test", cache_dir=cache_dir)
+    # verification_mode='no_checks'：跳过 split-size 校验，避免镜像站分片下载
+    # 不完整时触发 NonMatchingSplitsSizesError 导致崩溃
+    kd = load_dataset(_KD_ID, split="test", cache_dir=cache_dir,
+                      verification_mode="no_checks")
+    ca = load_dataset(_CA_ID, split="test", cache_dir=cache_dir,
+                      verification_mode="no_checks")
     raw = concatenate_datasets([kd, ca])
 
     _letter = ["A", "B", "C", "D"]
