@@ -19,6 +19,12 @@ SYSTEM_PROMPTS: Dict[str, str] = {
         "Always end with a single line: 'Final answer: X' where X is A/B/C/D. "
         "Do not add any text after that line."
     ),
+    "medmcqa": (
+        "You are a medical expert specializing in postgraduate medical entrance exams. "
+        "Reason concisely (within 3 sentences) in English. "
+        "Always end with a single line: 'Final answer: X' where X is A/B/C/D. "
+        "Do not add any text after that line."
+    ),
     "jecqa": (
         "你是一位中国法律专家。请用中文简洁推理（不超过3句话）。"
         "最后一行必须且只能输出：'Final answer: X'，其中 X 是 A/B/C/D 之一。"
@@ -43,14 +49,53 @@ def load_medqa(split: str = "validation", limit: int = 100):
     return dataset
 
 
-def load_medmcqa(split: str = "validation", limit: int = 100):
-    """加载 MedMCQA，多项选择"""
+def load_medmcqa(split: str = "validation", limit: int = 0, subject: str = None):
+    """加载 MedMCQA（印度 PGMEE 医学研究生入学考试）。
 
+    过滤规则：
+      - 仅保留单选题（choice_type == 'single'）
+      - 仅保留 cop != -1 的条目（test split 的 cop 为 -1，无法用于评测）
+      - subject: 可指定科目过滤，如 'Surgery' / 'Pharmacology' / 'Pathology'
+
+    字段映射（统一为 pipeline 标准格式）：
+      question   → question
+      opa/b/c/d  → options: {"A": opa, "B": opb, "C": opc, "D": opd}
+      cop (0-3)  → answer_idx: "A"/"B"/"C"/"D"
+      subject_name → subject_name（保留，供 ablation 过滤）
+
+    评测建议：
+      使用 validation split（4183 条，答案完整），勿使用 test（cop=-1）。
+    """
     split = "validation" if split not in {"train", "validation", "test"} else split
-    dataset = load_dataset("medmcqa", split=split)
-    if limit:
-        dataset = dataset.select(range(min(limit, len(dataset))))
-    return dataset
+    raw = load_dataset("medmcqa", split=split)
+
+    _letter = ["A", "B", "C", "D"]
+    rows = []
+    for item in raw:
+        if item.get("choice_type", "single") != "single":
+            continue
+        cop = item.get("cop", -1)
+        if cop == -1 or not (0 <= cop <= 3):
+            continue
+        if subject and item.get("subject_name", "") != subject:
+            continue
+        rows.append({
+            "question":     item["question"],
+            "options": {
+                "A": item.get("opa", ""),
+                "B": item.get("opb", ""),
+                "C": item.get("opc", ""),
+                "D": item.get("opd", ""),
+            },
+            "answer_idx":   _letter[cop],
+            "subject_name": item.get("subject_name", ""),
+            "topic_name":   item.get("topic_name", ""),
+        })
+        if limit and len(rows) >= limit:
+            break
+
+    from datasets import Dataset
+    return Dataset.from_list(rows)
 
 
 def load_jecqa(split: str = "test", limit: int = 0, offset: int = 0, cache_dir: str = "/data/ocean/decoding/data/jecqa_cache"):

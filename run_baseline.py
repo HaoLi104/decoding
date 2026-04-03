@@ -44,7 +44,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 # 使用与 run_benchmark.py 完全相同的 prompt 格式与数据加载
-from data_loader import format_prompt, load_jecqa, load_medqa
+from data_loader import format_prompt, load_jecqa, load_medqa, load_medmcqa
 
 
 # ---------------------------------------------------------------------------
@@ -191,12 +191,14 @@ def evaluate(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="单模型 Baseline 评测（MedQA / JEC-QA）")
+    parser = argparse.ArgumentParser(description="单模型 Baseline 评测（MedQA / MedMCQA / JEC-QA）")
     parser.add_argument("--model",   required=True, help="模型路径")
-    parser.add_argument("--dataset", default="medqa", choices=["medqa", "jecqa"],
-                        help="评测数据集：medqa（默认）或 jecqa（中国司法考试）")
-    parser.add_argument("--limit",   type=int, default=200, help="评测样本数")
-    parser.add_argument("--split",   default="test", choices=["train", "test"])
+    parser.add_argument("--dataset", default="medqa", choices=["medqa", "jecqa", "medmcqa"],
+                        help="评测数据集：medqa / medmcqa（印度 PGMEE）/ jecqa（中国司法考试）")
+    parser.add_argument("--limit",   type=int, default=200, help="评测样本数，0=全量")
+    parser.add_argument("--split",   default="test", choices=["train", "validation", "test"])
+    parser.add_argument("--subject", default=None,
+                        help="medmcqa 专用：按科目过滤，如 Surgery / Pharmacology / Pathology")
     parser.add_argument("--batch_size",     type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--out",     required=True, help="结果 JSON 输出路径")
@@ -205,6 +207,10 @@ def main() -> None:
     if args.dataset == "jecqa":
         print(f"[加载数据集] JEC-QA（AGIEval KD+CA，单选）limit={args.limit}")
         dataset = load_jecqa(limit=args.limit)
+    elif args.dataset == "medmcqa":
+        split = args.split if args.split in {"train", "validation", "test"} else "validation"
+        print(f"[加载数据集] MedMCQA split={split} subject={args.subject} limit={args.limit}")
+        dataset = load_medmcqa(split=split, limit=args.limit, subject=args.subject)
     else:
         print(f"[加载数据集] MedQA-USMLE split={args.split} limit={args.limit}")
         dataset = load_medqa(split=args.split, limit=args.limit)
