@@ -65,11 +65,12 @@ if [[ "${SKIP_DATA_PREP}" == "false" ]]; then
     echo "========== Step 1: 准备 MedMCQA 混合训练数据 =========="
     cd "${WORK_DIR}"
     python prepare_finetune_data_medmcqa.py \
-        --out_dir       "${DATA_DIR}" \
-        --domain_limit  15000 \
-        --general_ratio 0.25 \
-        --val_size      0.05 \
-        --seed          42 \
+        --out_dir        "${DATA_DIR}" \
+        --tokenizer_path "${MODEL_BASE}" \
+        --domain_limit   15000 \
+        --general_ratio  0.25 \
+        --val_size       0.05 \
+        --seed           42 \
         2>&1 | tee "${LOG_DIR}/data_prep.log"
     echo "数据准备完成，日志: ${LOG_DIR}/data_prep.log"
 else

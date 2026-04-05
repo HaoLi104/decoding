@@ -1,17 +1,27 @@
 """
-微调数据准备脚本 — 生成 Qwen2.5-3B-Instruct-MedMCQA 训练集
+微调数据准备脚本 — 生成 Qwen2.5-3B-Instruct-MedMCQA 训练集（格式修正版）
 
 数据集：medmcqa（印度 PGMEE 医学研究生入学考试，单选题）
-  - train：182,822 条，含解释字段 exp（直接用作推理链，解决 Law 域失败的根源）
+  - train：182,822 条
   - 仅保留 choice_type='single' + cop != -1
 
-混合比例（与医疗实验保持一致）：
-  75% MedMCQA train MCQ — 训练/评测格式完全对齐（MCQ in → reasoning + Final answer: X）
-  25% tatsu-lab/alpaca  — 通用指令格式锚点，防止 Chat Template 坍塌
+【关键修复：训练/评测格式完全统一】
+  训练 input  = format_prompt(dataset_name="medmcqa")  ← 与 run_baseline.py 完全一致
+  训练 output = "Final answer: X"                      ← 极短，永远不会被 max_new_tokens 截断
 
-输出格式 output（严格对齐 extract_answer 期望）：
-  "{exp}\n\nFinal answer: X"
-  若 exp 为空则退化为 "Final answer: X"
+  之前失败的根因：
+    1. 训练用自定义格式，评测用 format_prompt() → prompt 结构从未见过
+    2. 训练 output = exp + "Final answer: X"（400+ token），但评测 max_new_tokens=256 截断
+
+  由于 LLaMA-Factory alpaca 格式下：
+    - instruction + input → 用户消息（不算 loss）
+    - output             → 助手消息（算 loss）
+  训练时系统/用户提示完全保留，只对 "Final answer: X" 计算梯度。
+  推理时提示不变，模型按正常推理流程生成，最终必然以 "Final answer: X" 结尾。
+
+混合比例：
+  75% MedMCQA train MCQ（格式已修正）
+  25% tatsu-lab/alpaca 通用指令（格式锚点）
 
 输出文件（远端机器）：
   /data/ocean/decoding/data/medmcqa_mix_train.json
@@ -41,41 +51,36 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 _LETTER = ["A", "B", "C", "D"]
 
-SYSTEM_INSTRUCTION = (
-    "You are a medical expert specializing in postgraduate medical entrance exams. "
-    "Answer the following multiple-choice question. "
-    "End your response with exactly one line: 'Final answer: X' "
-    "where X is the letter (A/B/C/D) of the best answer. "
-    "Do not add any text after that line."
-)
-
 
 # ---------------------------------------------------------------------------
 # 数据加载
 # ---------------------------------------------------------------------------
 
-def load_medmcqa_mcq(limit: int) -> List[Dict[str, Any]]:
+def load_medmcqa_mcq(limit: int, tokenizer_path: str) -> List[Dict[str, Any]]:
     """加载 medmcqa train split，转换为 alpaca 格式。
 
-    关键设计：
-    - 使用 exp（解释）字段作为推理链 → 输出格式与 extract_answer 完全对齐
-    - 仅保留 choice_type='single' 的单选题（与评测口径一致）
-    - cop=-1 表示 test 隐藏答案，此处不存在（train 全部有答案）
+    【格式修正核心】：
+    训练 input = format_prompt(dataset_name="medmcqa") 的完整输出，
+    与 run_baseline.py 的评测 prompt 完全一致，消除格式错位。
 
-    原始字段：
-      question   (str): 题干
-      opa/b/c/d  (str): 四个选项
-      cop        (int): 正确选项下标 0-3
-      exp        (str): 解题解释（可能为空）
-      subject_name (str): 科目名
-      choice_type  (str): 'single' 或 'multi'
+    LLaMA-Factory alpaca 格式 + qwen template 的拼接规则：
+      - instruction 字段 → <|im_start|>system ... <|im_end|>
+      - input 字段       → <|im_start|>user ... <|im_end|>
+      - output 字段      → <|im_start|>assistant ... <|im_end|>（计算 loss）
 
-    输出格式（严格对齐 run_baseline.py extract_answer）：
-      instruction: SYSTEM_INSTRUCTION
-      input:       "Question: ...\n\nOptions:\nA. ...\nB. ...\nC. ...\nD. ..."
-      output:      "{exp}\n\nFinal answer: X"（exp 为空时退化为 "Final answer: X"）
+    为统一格式，将 system prompt 放入 instruction，
+    将 format_prompt() 输出中的用户消息部分放入 input。
+    output 固定为 "Final answer: X"，保证 max_new_tokens=256 永不截断。
     """
     from datasets import load_dataset
+    from transformers import AutoTokenizer
+    from data_loader import SYSTEM_PROMPTS
+
+    # 加载 tokenizer 仅用于解析 apply_chat_template 产生的用户消息
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+
+    # 直接从 data_loader 取 system prompt，保证与评测完全一致
+    system_prompt = SYSTEM_PROMPTS["medmcqa"]
 
     ds = load_dataset("medmcqa", split="train")
 
@@ -96,21 +101,24 @@ def load_medmcqa_mcq(limit: int) -> List[Dict[str, Any]]:
             continue
 
         answer_letter = _LETTER[cop]
-        exp = str(item.get("exp", "")).strip()
 
-        opts_text = f"A. {opa}\nB. {opb}\nC. {opc}\nD. {opd}"
-        input_text = f"Question: {question}\n\nOptions:\n{opts_text}"
-
-        # 优先使用官方解释作为推理链；无解释时退化为仅输出答案
-        if exp:
-            output_text = f"{exp}\n\nFinal answer: {answer_letter}"
-        else:
-            output_text = f"Final answer: {answer_letter}"
+        # 与 format_prompt() 完全一致的选项格式
+        opt_lines = [f"A. {opa}", f"B. {opb}", f"C. {opc}", f"D. {opd}"]
+        # 与 format_prompt(dataset_name="medmcqa") 的 user_content 完全一致
+        user_content = (
+            question.strip()
+            + "\n"
+            + "\n".join(opt_lines)
+            + "\n\nBefore the final answer, repeat the chosen option text exactly once. "
+            + "Answer format: after reasoning, output the chosen option text, "
+            + "then end with exactly one line in the form 'Final answer: X' "
+            + "where X is one of A/B/C/D. No text is allowed after that line."
+        )
 
         records.append({
-            "instruction": SYSTEM_INSTRUCTION,
-            "input":       input_text,
-            "output":      output_text,
+            "instruction": system_prompt,    # → system 消息，不计 loss
+            "input":       user_content,     # → user 消息，不计 loss
+            "output":      f"Final answer: {answer_letter}",  # → assistant，计 loss
         })
         if len(records) >= limit:
             break
@@ -168,6 +176,9 @@ def main() -> None:
         description="准备 Qwen2.5-3B-Instruct-MedMCQA 微调数据集（LLaMA-Factory alpaca 格式）"
     )
     parser.add_argument("--out_dir",       type=str,   default="/data/ocean/decoding/data")
+    parser.add_argument("--tokenizer_path", type=str,
+                        default="/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct",
+                        help="Base 模型路径，用于加载 tokenizer（仅用于格式验证，不影响权重）")
     parser.add_argument("--domain_limit",  type=int,   default=15000,
                         help="MedMCQA 领域数据最大样本数（default: 15000）")
     parser.add_argument("--general_ratio", type=float, default=0.25,
@@ -182,7 +193,8 @@ def main() -> None:
 
     # Step 1：加载领域数据（75%）
     print(f"[1/4] 加载 medmcqa train（单选）  limit={args.domain_limit}")
-    domain_records = load_medmcqa_mcq(limit=args.domain_limit)
+    print(f"      tokenizer_path={args.tokenizer_path}")
+    domain_records = load_medmcqa_mcq(limit=args.domain_limit, tokenizer_path=args.tokenizer_path)
     print(f"      领域 MCQ 样本数: {len(domain_records)}")
 
     # Step 2：计算并加载通用数据（25%）
