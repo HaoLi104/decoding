@@ -1,0 +1,60 @@
+### ==========================================================================
+### LLaMA-Factory 微调配置 — Qwen2.5-3B-Instruct → Qwen2.5-3B-Instruct-MedMCQA
+###
+### 数据集：medmcqa（印度 PGMEE，单选，含解释 exp 字段作为推理链）
+### 关键改进（相比 Medical/Law 版本）：
+###   - 训练输出含推理链（exp 字段），格式与评测完全对齐
+###   - lr 更保守（5e-6 → 2e-6），防止重蹈 Law 域灾难性遗忘的覆辙
+###   - 先 1 epoch + eval，确认选择题 acc 上升后再决定是否续训
+###
+### 运行方式见 scripts/run_finetune_medmcqa_3b.sh
+### ==========================================================================
+
+
+### --- 1. 模型设置 --- ###
+model_name_or_path: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct
+trust_remote_code: true
+stage: sft
+do_train: true
+finetuning_type: full          # 全参数微调（FFT），禁止使用 lora / qlora
+
+
+### --- 2. 数据集设置 --- ###
+# 需在 LLaMA-Factory/data/dataset_info.json 中注册 medmcqa_mix_train
+# 注册方式见 prepare_finetune_data_medmcqa.py 输出的提示
+dataset: medmcqa_mix_train
+template: qwen                 # Qwen2.5 使用 qwen 模板，必须与 Base 保持一致
+cutoff_len: 2048               # MedMCQA 题干+解释约 300-600 token，2048 足够
+val_size: 0.0                  # 验证集已在 prepare_finetune_data_medmcqa.py 中独立拆分
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+
+### --- 3. 训练核心参数 --- ###
+# lr 相比 Medical 版本更保守（5e-6 → 2e-6），因为 Law 域失败教训表明
+# FFT + 过高 lr 会导致格式坍塌，降低选择题 acc
+learning_rate: 2.0e-6
+num_train_epochs: 1            # 先跑 1 epoch，跑完立即用 run_baseline.py 验证 acc
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+
+### --- 4. 单卡 H200 批次设置 --- ###
+# Qwen2.5-3B bfloat16 全参约占 6GB，H200 141GB 显存非常充裕
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 4   # 全局 batch = 1卡 × 8 × 4 = 32
+bf16: true
+gradient_checkpointing: false     # H200 显存充裕，关闭以加速
+flash_attn: auto
+
+
+### --- 5. 保存与日志 --- ###
+output_dir: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-MedMCQA
+logging_steps: 20
+save_strategy: epoch
+save_total_limit: 2
+plot_loss: true
+report_to: none
