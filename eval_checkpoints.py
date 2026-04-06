@@ -1,6 +1,17 @@
 """
 Checkpoint 扫描评测脚本 — 找 Delta(Draft-Base) 拐点，选最优 epoch。
 
+注意：必须在所有 import 之前设置 HF_DATASETS_OFFLINE=1，
+      否则 datasets 库在 builder 初始化阶段会尝试联网验证文件列表，
+      在无法访问 huggingface.co 的机器上会超时报错。
+      medmcqa 已在训练阶段下载到本地缓存，离线模式直接复用缓存。
+"""
+
+import os
+# 必须在 datasets 相关 import 之前设置，防止联网验证 medmcqa 文件列表
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
 功能：
   扫描 output_dir 下所有 checkpoint-* 子目录（每个 epoch 保存一个），
   依次加载并在 medmcqa validation 集上评测 acc，输出对比表。
@@ -27,6 +38,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
+# data_loader 的 setdefault 在此之前已由顶部代码处理
 from data_loader import format_prompt, load_medmcqa
 
 # ---------------------------------------------------------------------------
