@@ -34,8 +34,8 @@ from typing import Any, Dict, List
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
-_LETTER = ["A", "B", "C", "D"]
-_VALID  = set(_LETTER)
+_VALID_ANSWERS  = {"A", "B", "C", "D"}    # 只保留答案为 A-D 的题
+_REQUIRED_KEYS  = {"A", "B", "C", "D"}    # 选项 dict 必须含 A/B/C/D（允许额外含 E）
 
 
 # ---------------------------------------------------------------------------
@@ -67,10 +67,12 @@ def load_cmb_mcq(limit: int, seed: int, val_size: int = 1000) -> List[Dict[str, 
         if item.get("question_type", "") != "单项选择题":
             continue
         ans = str(item.get("answer", "")).strip().upper()
-        if ans not in _VALID:
+        if ans not in _VALID_ANSWERS:         # 只保留答案 A-D，过滤答案 E
             continue
         opt = item.get("option", {})
-        if not isinstance(opt, dict) or set(opt.keys()) != _VALID:
+        if not isinstance(opt, dict):
+            continue
+        if not _REQUIRED_KEYS.issubset(set(opt.keys())):  # 必须含 A/B/C/D，允许额外有 E
             continue
         question = str(item.get("question", "")).strip()
         if not question:

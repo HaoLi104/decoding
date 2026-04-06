@@ -251,23 +251,27 @@ def load_cmb_exam(
     with open(path, "r", encoding="utf-8") as f:
         raw = _json.load(f)
 
-    _valid_letters = {"A", "B", "C", "D"}
+    _valid_answers = {"A", "B", "C", "D"}
+    _required_keys = {"A", "B", "C", "D"}   # 选项 dict 至少包含这4个键（允许额外含 E）
 
     filtered = []
     for item in raw:
         if item.get("question_type", "") != "单项选择题":
             continue
         ans = str(item.get("answer", "")).strip().upper()
-        if ans not in _valid_letters:
+        if ans not in _valid_answers:   # 只保留答案为 A/B/C/D 的题（过滤答案为 E 的题）
             continue
         opt = item.get("option", {})
         if not isinstance(opt, dict):
             continue
-        if set(opt.keys()) != _valid_letters:
+        if not _required_keys.issubset(set(opt.keys())):  # 必须含 A/B/C/D，允许额外有 E
+            continue
+        question = str(item.get("question", "")).strip()
+        if not question:
             continue
         filtered.append({
-            "question":     str(item.get("question", "")).strip(),
-            "options":      {k: str(v).strip() for k, v in opt.items()},
+            "question":     question,
+            "options":      {k: str(v).strip() for k, v in opt.items()},  # 保留所有选项含E
             "answer_idx":   ans,
             "exam_subject": str(item.get("exam_subject", "")).strip(),
             "exam_class":   str(item.get("exam_class", "")).strip(),
