@@ -141,14 +141,27 @@ def eval_one_checkpoint(ckpt_path: str, dataset, max_new_tokens: int = 256) -> d
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="扫描所有 checkpoint，找最优 epoch")
-    parser.add_argument("--ckpt_dir",  required=True,
+    # --ckpt_dir 与 --checkpoint_dir 均可接受（兼容旧调用方式）
+    parser.add_argument("--ckpt_dir", "--checkpoint_dir", dest="ckpt_dir", required=True,
                         help="模型输出目录（含 checkpoint-* 子目录）")
-    parser.add_argument("--base_acc",  type=float, default=0.4833,
-                        help="Base-3B 在同数据集上的 acc（用于计算 Delta）")
-    parser.add_argument("--limit",     type=int,   default=300)
+    parser.add_argument("--base_acc",  type=float, default=None,
+                        help="Base-3B 在同数据集上的 acc（手动指定；与 --base_model 互斥）")
+    parser.add_argument("--base_model", type=str, default=None,
+                        help="若指定，则自动运行 Base 模型并计算 base_acc（会消耗额外时间）")
+    parser.add_argument("--dataset",   type=str,   default="medmcqa",
+                        choices=["medmcqa"], help="评测数据集（当前仅支持 medmcqa）")
+    parser.add_argument("--subject",   type=str,   default="",
+                        help="若指定，仅评测该 subject_name 的题目（如 Surgery）")
+    parser.add_argument("--split",     type=str,   default="validation",
+                        help="数据集分片（default: validation）")
+    parser.add_argument("--limit",     type=int,   default=300,
+                        help="评测样本数上限（0=全量）")
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--out",       required=True, help="结果 JSON 输出路径")
     args = parser.parse_args()
+
+    if args.base_acc is None and args.base_model is None:
+        parser.error("必须指定 --base_acc 或 --base_model 之一")
 
     # 收集所有 checkpoint 目录（按 step 数排序）
     ckpt_root = Path(args.ckpt_dir)
@@ -169,9 +182,22 @@ def main() -> None:
     for d in ckpt_dirs:
         print(f"  {d}")
 
-    print(f"\n加载 MedMCQA validation（limit={args.limit}）")
-    dataset = load_medmcqa(split="validation", limit=args.limit)
+    print(f"\n加载 MedMCQA {args.split}（limit={args.limit}，subject='{args.subject or '全科'}'）")
+    dataset = load_medmcqa(split=args.split, limit=args.limit, subject=args.subject)
     print(f"  共 {len(dataset)} 条样本")
+
+    # 计算 base_acc（若未手动指定则自动运行 Base 模型）
+    base_acc: float
+    if args.base_acc is not None:
+        base_acc = args.base_acc
+        print(f"  [base_acc] 使用手动指定值: {base_acc:.4f}")
+    else:
+        print(f"\n  [base_acc] 正在用 {args.base_model} 计算 Base baseline ...")
+        base_result = eval_one_checkpoint(
+            args.base_model, dataset, max_new_tokens=args.max_new_tokens
+        )
+        base_acc = base_result["acc"]
+        print(f"  [base_acc] 计算完成: {base_acc:.4f}  (n={base_result['n']})")
 
     results = []
     for ckpt_path in ckpt_dirs:
@@ -185,16 +211,16 @@ def main() -> None:
     print(f"\n{'='*65}")
     print(f"{'Checkpoint':<40} {'acc':>6} {'Delta(D-B)':>12} {'tps':>7}")
     print(f"{'='*65}")
-    print(f"  {'[Base-3B baseline]':<38} {args.base_acc:.4f} {'---':>12}")
+    print(f"  {'[Base-3B baseline]':<38} {base_acc:.4f} {'---':>12}")
     best = max(results, key=lambda r: r["acc"])
     for r in results:
         name  = Path(r["ckpt"]).name
-        delta = r["acc"] - args.base_acc
+        delta = r["acc"] - base_acc
         flag  = " ← best" if r["ckpt"] == best["ckpt"] else ""
         print(f"  {name:<38} {r['acc']:.4f} {delta:+12.4f} {r['tps']:>7.1f}{flag}")
     print(f"{'='*65}")
     print(f"\n最优 checkpoint：{best['ckpt']}")
-    print(f"  acc={best['acc']:.4f}  Delta={best['acc']-args.base_acc:+.4f}")
+    print(f"  acc={best['acc']:.4f}  Delta={best['acc']-base_acc:+.4f}")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,61 @@
+### ==========================================================================
+### LLaMA-Factory 微调配置 — Qwen2.5-3B-Instruct → Qwen2.5-3B-Instruct-Surgery
+###
+### 数据集：medmcqa train 中 subject_name="Surgery" 的专项外科题
+###   - Train：MedMCQA 外科题（全量，约 20,000+ 条）+ 25% Alpaca 通用数据
+###   - 评测对比（Science）：Target=0.60，Base=0.51，目标 Draft > 0.61（Delta ≥ +0.10）
+###
+### 选择 Surgery 的理由：
+###   1. Target-32B acc=0.60（远低于 0.70 阈值，ΔP 信号空间充足）
+###   2. 外科知识高度专业化（手术指征/入路/并发症），预训练覆盖率低
+###   3. MedMCQA 中外科题量 ≈ 22,000 条，专项微调数据充裕
+###
+### 运行方式见 scripts/run_finetune_medmcqa_surgery_3b.sh
+### ==========================================================================
+
+
+### --- 1. 模型设置 --- ###
+model_name_or_path: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct
+trust_remote_code: true
+stage: sft
+do_train: true
+finetuning_type: full          # 全参数微调（FFT），禁止使用 lora / qlora
+
+
+### --- 2. 数据集设置 --- ###
+# 需在 LLaMA-Factory/data/dataset_info.json 中注册 medmcqa_surgery_mix_train
+# 注册方式见 prepare_finetune_data_medmcqa.py 输出的提示
+dataset: medmcqa_surgery_mix_train
+template: qwen                 # Qwen2.5 使用 qwen 模板，必须与 Base 保持一致
+cutoff_len: 2048
+val_size: 0.0
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+
+### --- 3. 训练核心参数 --- ###
+# 专科数据量比全科小，适当提高 lr 以加速收敛，但仍保持保守
+learning_rate: 3.0e-6
+num_train_epochs: 5            # 5 epoch：外科专科数据量约 20k，多训几轮以充分学习
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+
+### --- 4. 单卡 H200 批次设置 --- ###
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 4   # 全局 batch = 1卡 × 8 × 4 = 32
+bf16: true
+gradient_checkpointing: false
+flash_attn: auto
+
+
+### --- 5. 保存与日志 --- ###
+output_dir: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Surgery
+logging_steps: 20
+save_strategy: epoch
+save_total_limit: 5            # 保留全部 5 个 epoch checkpoint，供 checkpoint sweep 选最优
+plot_loss: true
+report_to: none
