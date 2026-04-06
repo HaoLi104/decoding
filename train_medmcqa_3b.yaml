@@ -34,7 +34,7 @@ preprocessing_num_workers: 8
 # lr 相比 Medical 版本更保守（5e-6 → 2e-6），因为 Law 域失败教训表明
 # FFT + 过高 lr 会导致格式坍塌，降低选择题 acc
 learning_rate: 2.0e-6
-num_train_epochs: 2            # 2 epoch：第一轮已验证格式正确，直接上 2 epoch
+num_train_epochs: 4            # 4 epoch：训完后扫描每个 checkpoint，找 Delta(D-B) 拐点
 lr_scheduler_type: cosine
 warmup_ratio: 0.05
 weight_decay: 0.01
@@ -55,6 +55,6 @@ flash_attn: auto
 output_dir: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-MedMCQA
 logging_steps: 20
 save_strategy: epoch
-save_total_limit: 2
+save_total_limit: 4            # 保留全部 4 个 epoch checkpoint，供后续 eval 选最优
 plot_loss: true
 report_to: none
