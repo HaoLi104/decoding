@@ -33,15 +33,18 @@ CACHE_ROOTS = [
 
 found_files: list[Path] = []
 for cache_root in CACHE_ROOTS:
-    if not cache_root.exists():
-        continue
-    # 搜索 CMB train merge JSON（可能在 datasets/downloads/ 下）
-    for pattern in [
-        "**/CMB-train-merge.json",
-        "**/CMB*train*.json",
-        "**/FreedomIntelligence*CMB*train*.json",
-    ]:
-        found_files.extend(cache_root.glob(pattern))
+    try:
+        if not cache_root.exists():
+            continue
+        # 搜索 CMB train merge JSON（可能在 datasets/downloads/ 下）
+        for pattern in [
+            "**/CMB-train-merge.json",
+            "**/CMB*train*.json",
+            "**/FreedomIntelligence*CMB*train*.json",
+        ]:
+            found_files.extend(cache_root.glob(pattern))
+    except PermissionError:
+        print(f"  跳过（无权限）: {cache_root}")
 
 # 去重并过滤超小文件（< 10KB 可能是索引文件）
 found_files = sorted(set(f for f in found_files if f.stat().st_size > 10_000))
