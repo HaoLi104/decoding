@@ -44,7 +44,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 # 使用与 run_benchmark.py 完全相同的 prompt 格式与数据加载
-from data_loader import format_prompt, load_jecqa, load_medqa, load_medmcqa
+from data_loader import format_prompt, load_jecqa, load_medqa, load_medmcqa, load_cmb_exam
 
 
 # ---------------------------------------------------------------------------
@@ -193,8 +193,8 @@ def evaluate(
 def main() -> None:
     parser = argparse.ArgumentParser(description="单模型 Baseline 评测（MedQA / MedMCQA / JEC-QA）")
     parser.add_argument("--model",   required=True, help="模型路径")
-    parser.add_argument("--dataset", default="medqa", choices=["medqa", "jecqa", "medmcqa"],
-                        help="评测数据集：medqa / medmcqa（印度 PGMEE）/ jecqa（中国司法考试）")
+    parser.add_argument("--dataset", default="medqa", choices=["medqa", "jecqa", "medmcqa", "cmb"],
+                        help="评测数据集：medqa / medmcqa / jecqa / cmb（中国医师执照考试）")
     parser.add_argument("--limit",   type=int, default=200, help="评测样本数，0=全量")
     parser.add_argument("--split",   default="test", choices=["train", "validation", "test"])
     parser.add_argument("--subject", default=None,
@@ -211,6 +211,9 @@ def main() -> None:
         split = args.split if args.split in {"train", "validation", "test"} else "validation"
         print(f"[加载数据集] MedMCQA split={split} subject={args.subject} limit={args.limit}")
         dataset = load_medmcqa(split=split, limit=args.limit, subject=args.subject)
+    elif args.dataset == "cmb":
+        print(f"[加载数据集] CMB-Exam（中国医师执照考试，单选）split=val limit={args.limit}")
+        dataset = load_cmb_exam(split="val", limit=args.limit)
     else:
         print(f"[加载数据集] MedQA-USMLE split={args.split} limit={args.limit}")
         dataset = load_medqa(split=args.split, limit=args.limit)

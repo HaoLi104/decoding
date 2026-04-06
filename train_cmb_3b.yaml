@@ -1,0 +1,56 @@
+### ==========================================================================
+### LLaMA-Factory 微调配置 — Qwen2.5-3B-Instruct → Qwen2.5-3B-Instruct-CMB
+###
+### 数据集：FreedomIntelligence/CMB-Exam（中国医师执照考试，中文单选题）
+### 训练样本：20k CMB MCQ + 5k alpaca 通用 = 25k 总计
+### 关键优势：
+###   - 中文专业医学，Qwen 预训练覆盖率低 → ΔP 信号预期比 MedMCQA 更强
+###   - 格式与评测完全对齐（训练 output = "Final answer: X"）
+###   - 269k 原始数据，训练/评测集来自同一分布，无数据泄露
+###
+### 运行方式见 scripts/run_finetune_cmb_3b.sh
+### ==========================================================================
+
+
+### --- 1. 模型设置 --- ###
+model_name_or_path: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct
+trust_remote_code: true
+stage: sft
+do_train: true
+finetuning_type: full          # 全参数微调（FFT）
+
+
+### --- 2. 数据集设置 --- ###
+dataset: cmb_mix_train
+template: qwen
+cutoff_len: 2048
+val_size: 0.0
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+
+### --- 3. 训练核心参数 --- ###
+learning_rate: 2.0e-6          # 与 MedMCQA 相同的保守 lr
+num_train_epochs: 3            # 先训 3 epoch，checkpoint sweep 选最优
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+weight_decay: 0.01
+max_grad_norm: 1.0
+
+
+### --- 4. 单卡 H200 批次设置 --- ###
+per_device_train_batch_size: 8
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 4   # 全局 batch = 32
+bf16: true
+gradient_checkpointing: false
+flash_attn: auto
+
+
+### --- 5. 保存与日志 --- ###
+output_dir: /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-CMB
+logging_steps: 20
+save_strategy: epoch
+save_total_limit: 3            # 保留全部 3 个 epoch checkpoint
+plot_loss: true
+report_to: none

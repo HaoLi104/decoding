@@ -30,6 +30,11 @@ SYSTEM_PROMPTS: Dict[str, str] = {
         "最后一行必须且只能输出：'Final answer: X'，其中 X 是 A/B/C/D 之一。"
         "最后一行之后不要输出任何文字。"
     ),
+    "cmb": (
+        "你是一位中国医学专家，专长于医师执照考试。请用中文简洁推理（不超过3句话）。"
+        "最后一行必须且只能输出：'Final answer: X'，其中 X 是 A/B/C/D 之一。"
+        "最后一行之后不要输出任何文字。"
+    ),
 }
 
 # 向后兼容：默认 SYSTEM_PROMPT 指向 medqa
@@ -181,6 +186,106 @@ def load_jecqa(split: str = "test", limit: int = 0, offset: int = 0, cache_dir: 
         all_rows = all_rows[:limit]
 
     return Dataset.from_list(all_rows)
+
+
+def _find_cmb_train_json() -> str:
+    """自动定位本地 HF 缓存中的 CMB-train-merge.json。
+
+    搜索顺序：
+      1. 环境变量 CMB_TRAIN_JSON（用户手动指定路径）
+      2. ~/.cache/huggingface/hub/datasets--FreedomIntelligence--CMB/snapshots/*/CMB-Exam/CMB-train/CMB-train-merge.json
+    """
+    import glob as _glob
+
+    env_path = os.environ.get("CMB_TRAIN_JSON", "")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    pattern = os.path.expanduser(
+        "~/.cache/huggingface/hub/datasets--FreedomIntelligence--CMB"
+        "/snapshots/*/CMB-Exam/CMB-train/CMB-train-merge.json"
+    )
+    matches = _glob.glob(pattern)
+    if matches:
+        return matches[0]
+
+    raise FileNotFoundError(
+        "找不到 CMB-train-merge.json。\n"
+        "请设置环境变量：export CMB_TRAIN_JSON=/path/to/CMB-train-merge.json\n"
+        "或运行 probe_cmb_train.py 确认缓存路径。"
+    )
+
+
+def load_cmb_exam(
+    split: str = "val",
+    limit: int = 0,
+    val_size: int = 1000,
+    seed: int = 42,
+    json_path: str = "",
+) -> "Dataset":
+    """加载 CMB-Exam（中国医师执照考试）数据集。
+
+    数据源：FreedomIntelligence/CMB 中的 CMB-train-merge.json（本地缓存）。
+    直接加载 JSON 文件，绕过 datasets 库的 config 列名验证错误。
+
+    过滤规则：
+      - question_type == '单项选择题'（单选）
+      - answer in {A, B, C, D}（排除5选项/6选项及异常值）
+      - len(option) == 4 且 option 恰好含 A/B/C/D 键
+
+    Train/Val 切分（deterministic，seed=42）：
+      - val：打乱后前 val_size 条（默认 1000）
+      - train：打乱后剩余条目
+
+    返回字段（与 MedQA pipeline 完全一致）：
+      question   (str):  题干
+      options    (dict): {"A": ..., "B": ..., "C": ..., "D": ...}
+      answer_idx (str):  A/B/C/D
+      exam_subject (str): 科目（可用于 ablation 按科目过滤）
+    """
+    import json as _json
+    import random as _random
+    from datasets import Dataset
+
+    path = json_path or _find_cmb_train_json()
+    with open(path, "r", encoding="utf-8") as f:
+        raw = _json.load(f)
+
+    _valid_letters = {"A", "B", "C", "D"}
+
+    filtered = []
+    for item in raw:
+        if item.get("question_type", "") != "单项选择题":
+            continue
+        ans = str(item.get("answer", "")).strip().upper()
+        if ans not in _valid_letters:
+            continue
+        opt = item.get("option", {})
+        if not isinstance(opt, dict):
+            continue
+        if set(opt.keys()) != _valid_letters:
+            continue
+        filtered.append({
+            "question":     str(item.get("question", "")).strip(),
+            "options":      {k: str(v).strip() for k, v in opt.items()},
+            "answer_idx":   ans,
+            "exam_subject": str(item.get("exam_subject", "")).strip(),
+            "exam_class":   str(item.get("exam_class", "")).strip(),
+        })
+
+    # Deterministic shuffle
+    rng = _random.Random(seed)
+    rng.shuffle(filtered)
+
+    if split == "val":
+        data = filtered[:val_size]
+    else:  # train
+        data = filtered[val_size:]
+
+    if limit and limit > 0:
+        data = data[:limit]
+
+    return Dataset.from_list(data)
 
 
 def load_mmlu(subject: str, split: str = "test", limit: int = 100):
@@ -367,7 +472,7 @@ def format_prompt(
 
     sys_prompt = SYSTEM_PROMPTS.get(dataset_name, SYSTEM_PROMPT)
 
-    if dataset_name == "jecqa":
+    if dataset_name in ("jecqa", "cmb"):
         user_content = (
             question.strip()
             + "\n"
