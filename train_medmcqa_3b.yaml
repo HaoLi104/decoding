@@ -34,7 +34,7 @@ preprocessing_num_workers: 8
 # lr 相比 Medical 版本更保守（5e-6 → 2e-6），因为 Law 域失败教训表明
 # FFT + 过高 lr 会导致格式坍塌，降低选择题 acc
 learning_rate: 2.0e-6
-num_train_epochs: 1            # 先跑 1 epoch，跑完立即用 run_baseline.py 验证 acc
+num_train_epochs: 2            # 2 epoch：第一轮已验证格式正确，直接上 2 epoch
 lr_scheduler_type: cosine
 warmup_ratio: 0.05
 weight_decay: 0.01
