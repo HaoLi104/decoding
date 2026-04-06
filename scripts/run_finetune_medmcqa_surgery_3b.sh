@@ -74,13 +74,13 @@ conda run -n llamafactory311 --no-capture-output \
 # =============================================================================
 echo "========== Step 4: 扫描 checkpoint =========="
 python eval_checkpoints.py \
-    --ckpt_dir   /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Surgery \
-    --base_model "${BASE_MODEL}" \
-    --dataset    medmcqa \
-    --subject    Surgery \
-    --split      validation \
-    --limit      0 \
-    --out        results/baseline/surgery_checkpoint_sweep.json
+    --ckpt_dir  /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Surgery \
+    --base_acc  0.4940 \
+    --dataset   medmcqa \
+    --subject   Surgery \
+    --split     validation \
+    --limit     0 \
+    --out       results/baseline/surgery_checkpoint_sweep.json
 
 echo "========== 全流程完成 =========="
 echo "查看结果："
