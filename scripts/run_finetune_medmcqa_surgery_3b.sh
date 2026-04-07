@@ -15,6 +15,27 @@
 
 set -e
 cd /data/ocean/decoding
+
+# 非交互式 bash 不会加载 ~/.bashrc，必须先 source conda.sh，否则 conda activate 报错：
+#   CondaError: Run 'conda init' before 'conda activate'
+_CONDA_SH=""
+# 若安装路径不在下列列表，可先：export CONDA_ROOT=/path/to/conda 再运行本脚本
+for _d in "${CONDA_ROOT:-}" "$HOME/miniforge3" "$HOME/miniconda3" "$HOME/anaconda3" "/opt/conda"; do
+  [[ -z "$_d" ]] && continue
+  if [[ -f "${_d}/etc/profile.d/conda.sh" ]]; then
+    _CONDA_SH="${_d}/etc/profile.d/conda.sh"
+    break
+  fi
+done
+if [[ -n "$_CONDA_SH" ]]; then
+  # shellcheck disable=SC1090
+  source "$_CONDA_SH"
+elif command -v conda >/dev/null 2>&1; then
+  eval "$(conda shell.bash hook)"
+else
+  echo "ERROR: 未找到 conda（已尝试 miniforge3/miniconda3/anaconda3/opt/conda）" >&2
+  exit 1
+fi
 conda activate kvner
 
 export CUDA_VISIBLE_DEVICES=0
