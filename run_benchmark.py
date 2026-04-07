@@ -53,7 +53,7 @@ from config_v2 import (
     ModelPaths,
     StrategyType,
 )
-from data_loader import format_prompt, load_jecqa, load_medqa
+from data_loader import format_prompt, load_jecqa, load_medqa, load_medmcqa
 from decode_loop import DecodeResult, SpeculativeDecodeLoop
 from dual_stream_engine import DualStreamProposer
 from engine_state import TriModelOrchestrator
@@ -111,7 +111,7 @@ class BenchmarkResult:
 # 数据集加载
 # ---------------------------------------------------------------------------
 
-def _load_dataset(dataset_name: str, limit: int, split: str = "test") -> List[Dict[str, Any]]:
+def _load_dataset(dataset_name: str, limit: int, split: str = "test", **kwargs) -> List[Dict[str, Any]]:
     """加载指定数据集，返回格式化后的样本列表。
 
     Args:
@@ -155,6 +155,24 @@ def _load_dataset(dataset_name: str, limit: int, split: str = "test") -> List[Di
                 "gt":       gt,
             })
         return cases[:limit]
+
+    elif dataset_name == "medmcqa":
+        subject = kwargs.get("subject", "")
+        raw_ds = load_medmcqa(split=split, limit=limit, subject=subject if subject else None)
+        cases = []
+        for idx, item in enumerate(raw_ds):
+            q    = item.get("question", "")
+            opts = item.get("options", {})
+            gt   = str(item.get("answer_idx", "")).strip().upper()
+            if not q or not opts or gt not in {"A", "B", "C", "D"}:
+                continue
+            cases.append({
+                "id":       str(item.get("id", idx)),
+                "question": q,
+                "options":  opts,
+                "gt":       gt,
+            })
+        return cases[:limit] if limit else cases
 
     elif dataset_name == "gsm8k":
         from datasets import load_dataset as hf_load_dataset
@@ -734,7 +752,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
 
     # 数据集
-    p.add_argument("--dataset", choices=["medqa", "jecqa", "gsm8k"], default="medqa")
+    p.add_argument("--dataset", choices=["medqa", "jecqa", "gsm8k", "medmcqa"], default="medqa")
+    p.add_argument("--subject", default="", help="medmcqa 专用：按 subject_name 过滤（如 Surgery）")
     p.add_argument("--split",   default="test")
     p.add_argument("--limit",   type=int, default=300)
 
@@ -867,7 +886,8 @@ def main() -> None:
 
     # 加载数据集
     logger.info("=== 加载数据集: %s  limit=%d ===", args.dataset, args.limit)
-    dataset = _load_dataset(args.dataset, limit=args.limit, split=args.split)
+    dataset = _load_dataset(args.dataset, limit=args.limit, split=args.split,
+                            subject=getattr(args, "subject", ""))
     logger.info("加载完成，共 %d 条", len(dataset))
 
     # 解析策略枚举列表

@@ -35,7 +35,7 @@ class ModelPaths:
     """三模型路径配置（远端机器本地绝对路径）"""
     TARGET: str = "/data/ocean/decoding/model/Qwen/Qwen2.5-32B-Instruct"
     BASE:   str = "/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct"
-    DRAFT:  str = "/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Medical"
+    DRAFT:  str = "/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Surgery/checkpoint-1676"
 
 
 # ---------------------------------------------------------------------------
