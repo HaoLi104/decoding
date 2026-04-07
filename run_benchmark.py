@@ -356,8 +356,9 @@ def run_pure_target_baseline(
         prompt_ids  = tokenizer(prompt_text, return_tensors="pt")["input_ids"].to(device)
         prompt_len  = prompt_ids.shape[1]
 
-        # 使用 target_cache，每 sample 前 reset
+        # 每 sample 前 reset + allocate（reset 只清空引用，必须重新 allocate 才可访问）
         cache_mgr.reset()
+        cache_mgr.allocate()
         target_cache = cache_mgr.target_cache
 
         t0 = time.perf_counter()
