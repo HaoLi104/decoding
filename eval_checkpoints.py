@@ -7,12 +7,13 @@ Checkpoint 扫描评测脚本 — 找 Delta(Draft-Base) 拐点，选最优 epoch
       medmcqa 已在训练阶段下载到本地缓存，离线模式直接复用缓存。
 """
 
+# from __future__ 必须紧跟 docstring，不能在任何其他 import 语句之后
+from __future__ import annotations
+
 import os
 # 必须在 datasets 相关 import 之前设置，防止联网验证 medmcqa 文件列表
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-
-from __future__ import annotations
 
 import argparse
 import json
