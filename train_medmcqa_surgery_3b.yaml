@@ -23,8 +23,8 @@ finetuning_type: full          # 全参数微调（FFT），禁止使用 lora / 
 
 
 ### --- 2. 数据集设置 --- ###
-# 需在 LLaMA-Factory/data/dataset_info.json 中注册 medmcqa_surgery_mix_train
-# 注册方式见 prepare_finetune_data_medmcqa.py 输出的提示
+# dataset_dir：显式指定 LLaMA-Factory 的 data/ 目录，避免按 CWD 相对路径找不到 dataset_info.json
+dataset_dir: /data/ocean/decoding/LLaMA-Factory/data
 dataset: medmcqa_surgery_mix_train
 template: qwen                 # Qwen2.5 使用 qwen 模板，必须与 Base 保持一致
 cutoff_len: 2048

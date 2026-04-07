@@ -87,11 +87,12 @@ PYEOF
 # Step 3：启动微调
 # =============================================================================
 echo "========== Step 3: 启动 Surgery 专项微调 =========="
-# llamafactory-cli 默认按 CWD 下相对路径 "data/dataset_info.json" 查找数据集注册表；
-# 用 --dataset_dir 显式指定 LLaMA-Factory 内置的 data/ 目录，避免路径不一致报错。
+# dataset_dir 已写入 YAML，无需 CLI 传参。
+# conda run 不继承父 shell export，必须用 env 显式传入 CUDA_VISIBLE_DEVICES=0，
+# 否则 LLaMA-Factory 会检测到全部 8 张 GPU 并启动 8 路分布式，违反单卡约束。
 conda run -n llamafactory311 --no-capture-output \
-    llamafactory-cli train /data/ocean/decoding/train_medmcqa_surgery_3b.yaml \
-    --dataset_dir "${LLAMAFACTORY_DIR}/data"
+    env CUDA_VISIBLE_DEVICES=0 \
+    llamafactory-cli train /data/ocean/decoding/train_medmcqa_surgery_3b.yaml
 
 # =============================================================================
 # Step 4：扫描 checkpoint，找最优模型
