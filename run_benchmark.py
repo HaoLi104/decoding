@@ -350,16 +350,20 @@ def run_pure_target_baseline(
 
     logger.info("开始 pure_target 基线（手写 forward 循环）  n=%d", len(dataset))
 
+    # 循环外预分配 target_cache（保持同一对象，与 torch.compile CUDAGraphs 兼容）
+    # 每 sample 内用 rollback_cache(target_cache, 0) 清空内容，不重建对象
+    cache_mgr.reset()
+    cache_mgr.allocate()
+    target_cache = cache_mgr.target_cache
+
     for idx, item in enumerate(dataset):
         sample_id   = str(item.get("id", idx))
         prompt_text = _format_prompt(item, tokenizer, dataset_name)
         prompt_ids  = tokenizer(prompt_text, return_tensors="pt")["input_ids"].to(device)
         prompt_len  = prompt_ids.shape[1]
 
-        # 每 sample 前 reset + allocate（reset 只清空引用，必须重新 allocate 才可访问）
-        cache_mgr.reset()
-        cache_mgr.allocate()
-        target_cache = cache_mgr.target_cache
+        # 清空 cache 内容（同一对象，不触发 CUDAGraphs 地址变更）
+        cache_mgr.rollback_cache(target_cache, 0)
 
         t0 = time.perf_counter()
 

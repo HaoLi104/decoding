@@ -27,6 +27,18 @@ from transformers.cache_utils import StaticCache
 # 1. Prefill
 # ---------------------------------------------------------------------------
 
+def _cudagraph_mark_step() -> None:
+    """如果 torch.compiler.cudagraph_mark_step_begin 存在（PyTorch ≥ 2.1），则调用。
+
+    torch.compile(mode="reduce-overhead") 使用 CUDAGraphs 捕获静态计算图。
+    每次 model() 调用前调用此函数，通知 CUDAGraphs「本步骤使用的张量已更新」，
+    避免跨 sample 切换 StaticCache 对象时报 "overwritten by subsequent run"。
+    """
+    mark = getattr(getattr(torch, "compiler", None), "cudagraph_mark_step_begin", None)
+    if mark is not None:
+        mark()
+
+
 @torch.inference_mode()
 def prefill(
     model: AutoModelForCausalLM,
@@ -53,6 +65,7 @@ def prefill(
     # cache_position: [0, 1, ..., prompt_len-1]，StaticCache 用于定位写入位置
     cache_position = torch.arange(prompt_len, dtype=torch.long, device=device)
 
+    _cudagraph_mark_step()
     out = model(
         input_ids=input_ids,
         attention_mask=attention_mask,
@@ -101,6 +114,7 @@ def decode_step(
     # cache_position 指明本次写入 cache 的位置
     cache_position = torch.tensor([position_id], dtype=torch.long, device=device)
 
+    _cudagraph_mark_step()
     out = model(
         input_ids=token_id,            # shape: [1, 1]
         attention_mask=attention_mask,
@@ -154,6 +168,7 @@ def decode_batch_verify(
         start_position, start_position + k, dtype=torch.long, device=device
     )
 
+    _cudagraph_mark_step()
     out = model(
         input_ids=token_ids,
         attention_mask=attention_mask,
@@ -205,6 +220,7 @@ def decode_batch_hidden_only(
         start_position, start_position + k, dtype=torch.long, device=device
     )
 
+    _cudagraph_mark_step()
     out = model(
         input_ids=token_ids,
         attention_mask=attention_mask,
