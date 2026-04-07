@@ -195,7 +195,7 @@ def _load_dataset(dataset_name: str, limit: int, split: str = "test", **kwargs) 
 
 def _format_prompt(item: Dict[str, Any], tokenizer, dataset_name: str) -> str:
     """将样本格式化为 prompt 字符串。"""
-    if dataset_name in {"medqa", "jecqa"}:
+    if dataset_name in {"medqa", "jecqa", "medmcqa"}:
         return format_prompt(tokenizer, item["question"], item["options"], dataset_name=dataset_name)
     elif dataset_name == "gsm8k":
         return (
@@ -209,12 +209,10 @@ def _format_prompt(item: Dict[str, Any], tokenizer, dataset_name: str) -> str:
 
 def _extract_pred(response: str, dataset_name: str) -> str:
     """从生成文本中提取预测答案。"""
-    if dataset_name == "medqa":
-        full = response
-        pred = extract_answer(full)
+    if dataset_name in {"medqa", "jecqa", "medmcqa"}:
+        pred = extract_answer(response)
         return pred if pred in {"A", "B", "C", "D"} else ""
     elif dataset_name == "gsm8k":
-        # 提取 #### 后的数字
         import re
         match = re.search(r"####\s*([\-\d,\.]+)", response)
         return match.group(1).replace(",", "").strip() if match else ""
@@ -225,7 +223,7 @@ def _check_correct(pred: str, gt: str, dataset_name: str) -> bool:
     """判断预测是否正确。"""
     if not pred:
         return False
-    if dataset_name == "medqa":
+    if dataset_name in {"medqa", "jecqa", "medmcqa"}:
         return pred.upper() == gt.upper()
     elif dataset_name == "gsm8k":
         try:
