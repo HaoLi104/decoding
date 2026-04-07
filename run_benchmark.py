@@ -376,12 +376,13 @@ def run_pure_target_baseline(
             generated.append(next_token)
             if eos_id is not None and next_token == eos_id:
                 break
-            # 单步 decode_step
+            # decode_step 签名: (model, token_id: Tensor[1,1], cache, position_id: int)
+            token_tensor = torch.tensor([[next_token]], dtype=torch.long, device=device)
             last_logits = decode_step(
                 model=model,
-                token_id=next_token,
+                token_id=token_tensor,   # shape: [1, 1]
                 cache=target_cache,
-                seq_len=seq_len,
+                position_id=seq_len,     # 当前 token 在序列中的绝对位置
             )  # shape: [1, V]
             seq_len += 1
 
