@@ -62,7 +62,7 @@ def load_single_model(
     model_path: str,
     device: torch.device = torch.device("cuda:0"),
     dtype: torch.dtype = torch.bfloat16,
-    compile_mode: Optional[str] = "reduce-overhead",
+    compile_mode: Optional[str] = None,
 ) -> AutoModelForCausalLM:
     """加载单个因果语言模型并应用 torch.compile。
 
@@ -70,7 +70,9 @@ def load_single_model(
         model_path:   HuggingFace Hub ID 或本地路径。
         device:       目标设备，严格绑定 cuda:0。
         dtype:        模型精度，全局使用 bfloat16。
-        compile_mode: torch.compile 模式；传 None 跳过编译（调试用）。
+        compile_mode: torch.compile 模式；默认 None（不编译）。
+                      "reduce-overhead" 使用 CUDAGraphs，与 StaticCache 跨 sample
+                      复用存在兼容性问题（需 PyTorch ≥ 2.1）；建议仅在确认版本后启用。
 
     Returns:
         处于 eval 模式的 AutoModelForCausalLM 实例。

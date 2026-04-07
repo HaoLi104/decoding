@@ -805,8 +805,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     # 编译模式
     p.add_argument(
-        "--no_compile", action="store_true",
-        help="跳过 torch.compile（调试用）",
+        "--no_compile", action="store_true", default=True,
+        help="跳过 torch.compile（默认开启；torch.compile mode=reduce-overhead 与 StaticCache 跨 sample 复用不兼容）",
+    )
+    p.add_argument(
+        "--compile", dest="no_compile", action="store_false",
+        help="启用 torch.compile（需 PyTorch ≥ 2.1 且 cudagraph_mark_step_begin 可用）",
     )
     p.add_argument(
         "--aggregate_summaries_only",
