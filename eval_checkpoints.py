@@ -12,20 +12,6 @@ import os
 os.environ["HF_DATASETS_OFFLINE"] = "1"
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
-功能：
-  扫描 output_dir 下所有 checkpoint-* 子目录（每个 epoch 保存一个），
-  依次加载并在 medmcqa validation 集上评测 acc，输出对比表。
-
-用法（远端机器）：
-  cd /data/ocean/decoding && conda activate kvner
-  export CUDA_VISIBLE_DEVICES=0
-  python eval_checkpoints.py \
-      --ckpt_dir /data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-MedMCQA \
-      --base_acc 0.4833 \
-      --limit 300 \
-      --out results/baseline/checkpoint_sweep_medmcqa.json
-"""
-
 from __future__ import annotations
 
 import argparse
