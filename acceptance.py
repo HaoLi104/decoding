@@ -456,7 +456,30 @@ class SoftGuidanceC2(AcceptanceStrategy):
                 p_target=p_target_prime,
             )
 
-        # 代入标准验收公式
+        # 贪婪模式（t_sample=0）：检查修正后 logit 的 argmax 是否等于 draft token
+        # 这是 C2 的核心：若 alpha 足够大翻转了 Target 的 argmax，则接受该 token
+        if ctx.t_sample == 0.0:
+            target_prime_top1 = _argmax_token(logit_target_prime)
+            if target_prime_top1 == x:
+                return AcceptResult(
+                    accepted=True,
+                    chosen_token_id=x,
+                    reason="c2_greedy_argmax_flipped_accepted",
+                    delta_p=delta_p,
+                    p_draft=p_draft,
+                    p_target=p_target_prime,
+                )
+            else:
+                return AcceptResult(
+                    accepted=False,
+                    chosen_token_id=target_prime_top1,
+                    reason="c2_greedy_argmax_not_flipped_rejected",
+                    delta_p=delta_p,
+                    p_draft=p_draft,
+                    p_target=p_target_prime,
+                )
+
+        # 随机采样模式（t_sample > 0）：标准概率比值验收
         p_accept = min(1.0, p_target_prime / p_draft)
 
         if torch.rand(1).item() < p_accept:
