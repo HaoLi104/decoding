@@ -82,6 +82,9 @@ class DecodeConfig:
     t_sample:        float = 0.0     # 全局采样温度（0=贪婪，0.6=随机采样）
     alpha:           float = 1.0     # C1/C2 软引导强度 α
     stop_on_eos:     bool  = True
+    # C2 专用：注入变体与 Top-K 参数
+    c2_variant:      str   = "full"  # "full" | "onehot" | "topk"
+    c2_topk:         int   = 5       # topk 变体的 K 值
 
 
 # ---------------------------------------------------------------------------

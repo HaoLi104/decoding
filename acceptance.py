@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 from config_v2 import DomainSignalParams, StrategyType
 from domain_signal import (
     check_domain_condition,
+    compute_delta_logit_masked,
     compute_delta_logit_normalized,
     compute_delta_p,
 )
@@ -407,28 +408,46 @@ class SoftGuidanceC1(AcceptanceStrategy):
 # ---------------------------------------------------------------------------
 
 class SoftGuidanceC2(AcceptanceStrategy):
-    """策略 C2：Logit 层标准化残差注入。
+    """策略 C2：Logit 层标准化残差注入（支持三种注入变体）。
 
     数学定义：
         ΔLogit      = logit_draft - logit_base
-        ΔLogit_norm = (ΔLogit - μ) / σ         ← Z-score 标准化
-        Logit'_target = logit_target + α · ΔLogit_norm
+        ΔLogit_norm = (ΔLogit - μ) / σ           ← Z-score 标准化
+        ΔLogit_masked = ΔLogit_norm ⊙ M(variant)  ← 按变体施加掩码
+        Logit'_target = logit_target + α · ΔLogit_masked
         P'_target(x) = Softmax(Logit'_target)[x]
         P_accept     = min(1, P'_target(x) / P_draft(x))
+
+    variant 控制注入范围（通过 --c2_variant 命令行参数设置）：
+        "full"   → 全词表注入（原始 C2，无掩码）
+        "onehot" → 仅对 draft 提案 token x 定向注入（one-hot 掩码）
+        "topk"   → 仅注入 Draft Top-K Token 的领域信号，过滤长尾噪音
 
     Z-score 消除不同规模模型 logit 尺度差异，使 α 具有跨模型可迁移语义。
     """
 
-    def __init__(self, alpha: float, t_fixed: float = 1.0) -> None:
-        self._alpha   = alpha
-        self._t_fixed = t_fixed
+    def __init__(
+        self,
+        alpha:      float,
+        t_fixed:    float = 1.0,
+        c2_variant: str   = "full",  # "full" | "onehot" | "topk"
+        c2_topk:    int   = 5,
+    ) -> None:
+        self._alpha      = alpha
+        self._t_fixed    = t_fixed
+        self._c2_variant = c2_variant
+        self._c2_topk    = c2_topk
 
     def evaluate(self, ctx: VerifyContext) -> AcceptResult:
         x = ctx.draft_token_id
 
-        # 计算 Z-score 标准化 ΔLogit_norm，shape: [1, vocab_size]
-        delta_logit_norm = compute_delta_logit_normalized(
-            ctx.logit_draft, ctx.logit_base
+        # 计算带掩码的 Z-score ΔLogit_norm，shape: [1, vocab_size]
+        # variant 决定哪些位置非零：full=全词表, onehot=仅x, topk=Draft Top-K
+        delta_logit_norm = compute_delta_logit_masked(
+            ctx.logit_draft, ctx.logit_base,
+            draft_token_id=x,
+            c2_variant=self._c2_variant,
+            topk=self._c2_topk,
         )
 
         # 残差注入：Logit'_target = logit_target + α · ΔLogit_norm
@@ -523,6 +542,7 @@ def create_strategy(
     strategy_type:  StrategyType,
     signal_params:  DomainSignalParams = DomainSignalParams(),
     alpha:          float = 1.0,
+    **kwargs,
 ) -> AcceptanceStrategy:
     """根据 StrategyType 枚举实例化对应的验收策略。
 
@@ -530,6 +550,9 @@ def create_strategy(
         strategy_type: 策略枚举值
         signal_params: 领域信号超参数（θ_high, τ, T_fixed）
         alpha:         C1/C2 软引导强度
+        **kwargs:      C2 专用扩展参数：
+                         c2_variant (str):  注入变体 full | onehot | topk（默认 full）
+                         c2_topk    (int):  topk 变体的 K 值（默认 5）
 
     Returns:
         AcceptanceStrategy 子类实例
@@ -549,7 +572,12 @@ def create_strategy(
         return SoftGuidanceC1(alpha=alpha, signal_params=signal_params)
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C2:
-        return SoftGuidanceC2(alpha=alpha, t_fixed=t_fixed)
+        return SoftGuidanceC2(
+            alpha=alpha,
+            t_fixed=t_fixed,
+            c2_variant=kwargs.get("c2_variant", "full"),
+            c2_topk=int(kwargs.get("c2_topk", 5)),
+        )
 
     else:
         raise ValueError(f"未知策略类型: {strategy_type}")

@@ -130,6 +130,75 @@ def compute_delta_logit_normalized(
     return delta_logit_norm
 
 
+def compute_delta_logit_masked(
+    logit_draft:    torch.Tensor,   # shape: [1, vocab_size]
+    logit_base:     torch.Tensor,   # shape: [1, vocab_size]
+    draft_token_id: int,
+    c2_variant:     str   = "full", # "full" | "onehot" | "topk"
+    topk:           int   = 5,
+    eps:            float = 1e-8,
+) -> torch.Tensor:
+    """计算带掩码的 Z-score ΔLogit_norm，策略 C2 三种注入变体的统一入口。
+
+    三种变体的数学定义：
+
+    ① full（全词表注入，原始 C2）：
+        ΔLogit_masked = ΔLogit_norm           （无掩码，全词表）
+
+    ② onehot（单 Token 定向提升）：
+        M[i] = 1 if i == draft_token_id else 0
+        ΔLogit_masked = ΔLogit_norm ⊙ M       （仅提升 draft 提案 Token）
+        优点：消除全词表竞争，只定向抬高目标 Token 的 logit
+
+    ③ topk（专家核心意见注入）：
+        V_K = {top-K indices of logit_draft}
+        M[i] = 1 if i ∈ V_K else 0
+        ΔLogit_masked = ΔLogit_norm ⊙ M       （仅注入 Draft Top-K 的领域信号）
+        优点：保留 Draft 的高置信 Expert Token 集合，过滤长尾噪音
+
+    Args:
+        logit_draft:    Draft 输出 logit，shape [1, vocab_size]
+        logit_base:     Base  输出 logit，shape [1, vocab_size]
+        draft_token_id: Draft 本步提案 token id（onehot 时使用）
+        c2_variant:     注入模式：full | onehot | topk
+        topk:           topk 模式下的 K 值（默认 5）
+        eps:            Z-score 防零小量
+
+    Returns:
+        delta_logit_masked: 掩码后的 ΔLogit_norm，shape [1, vocab_size]
+        （full 模式下与 compute_delta_logit_normalized 等价）
+    """
+    # 先计算 Z-score ΔLogit_norm，shape: [1, V]
+    delta_logit      = logit_draft - logit_base
+    mu               = delta_logit.mean(dim=-1, keepdim=True)   # [1, 1]
+    sigma            = delta_logit.std(dim=-1,  keepdim=True)   # [1, 1]
+    delta_logit_norm = (delta_logit - mu) / (sigma + eps)       # [1, V]
+
+    if c2_variant == "full":
+        return delta_logit_norm
+
+    V    = delta_logit_norm.shape[-1]
+    mask = torch.zeros_like(delta_logit_norm)   # [1, V]，全零掩码
+
+    if c2_variant == "onehot":
+        # 仅在 draft_token_id 位置置 1
+        if 0 <= draft_token_id < V:
+            mask[..., draft_token_id] = 1.0
+        # draft_token_id 超出 vocab 范围（理论上不应出现）时 mask 全零，退化为零注入
+
+    elif c2_variant == "topk":
+        # Top-K Draft Token 的索引集合 V_K
+        k_actual = min(topk, V)
+        # logit_draft 可能与 delta_logit_norm vocab 大小相同
+        _, top_indices = logit_draft[..., :V].topk(k_actual, dim=-1)  # [1, K]
+        mask.scatter_(-1, top_indices, 1.0)                           # 置对应位置为 1
+
+    else:
+        raise ValueError(f"未知 c2_variant: {c2_variant}，可选: full | onehot | topk")
+
+    return delta_logit_norm * mask   # [1, V]，非掩码位置为 0
+
+
 # ---------------------------------------------------------------------------
 # 辅助：提取全分布概率（不针对特定 token）
 # ---------------------------------------------------------------------------

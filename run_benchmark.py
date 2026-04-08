@@ -501,6 +501,8 @@ def run_single_config(
         strategy_type=config.strategy,
         signal_params=config.signal_params,
         alpha=config.alpha,
+        c2_variant=config.c2_variant,
+        c2_topk=config.c2_topk,
     )
 
     config_tag = (
@@ -653,6 +655,8 @@ def run_grid_search(
     gamma:        int,
     max_new_tokens: int,
     out_dir:      Path,
+    c2_variant:   str = "full",
+    c2_topk:      int = 5,
 ) -> List[BenchmarkResult]:
     """Strategy × α × T_sample 的正交网格搜索。
 
@@ -685,6 +689,8 @@ def run_grid_search(
                     max_new_tokens=max_new_tokens,
                     t_sample=t_sample,
                     alpha=actual_alpha,
+                    c2_variant=c2_variant,
+                    c2_topk=c2_topk,
                 )
                 result = run_single_config(
                     config=cfg,
@@ -812,6 +818,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--compile", dest="no_compile", action="store_false",
         help="启用 torch.compile（需 PyTorch ≥ 2.1 且 cudagraph_mark_step_begin 可用）",
     )
+    # C2 注入变体参数
+    p.add_argument(
+        "--c2_variant",
+        choices=["full", "onehot", "topk"],
+        default="full",
+        help=(
+            "C2 Logit 注入变体（仅对 soft_guidance_c2 生效）：\n"
+            "  full   - 全词表 Z-score 注入（原始 C2，默认）\n"
+            "  onehot - 仅对 draft 提案 token 定向注入（消除全词表竞争）\n"
+            "  topk   - 仅注入 Draft Top-K Token 的领域信号（过滤长尾噪音）"
+        ),
+    )
+    p.add_argument(
+        "--c2_topk",
+        type=int,
+        default=5,
+        help="C2 topk 变体的 K 值，即 Draft 输出保留的 Top-K Token 数（默认 5）",
+    )
+
     p.add_argument(
         "--aggregate_summaries_only",
         action="store_true",
@@ -945,6 +970,8 @@ def main() -> None:
         gamma=args.gamma,
         max_new_tokens=args.max_new_tokens,
         out_dir=out_dir,
+        c2_variant=args.c2_variant,
+        c2_topk=args.c2_topk,
     )
 
     # 与目录内已有单配置 summary 合并（续跑时 summary_table 含全部实验）
