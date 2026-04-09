@@ -145,13 +145,21 @@ class DeferredBaseProposer:
         # 回退 base_ctx.seq_len（与 Shadow Sync 一致）
         self._base_ctx.seq_len = base_start_seq_len
 
+        # ★ 确定性保障：主流等待 Base Stream 完成后再返回。
+        #   如不等待，Base 与后续 Target verify 并发执行，两个 BF16 大型 GEMM 争抢 SM，
+        #   导致 Base tiling 策略改变 → logit 数值系统性偏差 → acc 偏低约 4%。
+        #   等待后，Base 在 Target 之前完成（顺序为 Draft→Base→Target），
+        #   计算路径与 ShadowSync 等价，acc 结果可复现。
+        #   代价：失去并发收益；但实测 H200 上并发节省仅 +1.1% tps，不值得。
+        torch.cuda.current_stream().wait_stream(self._base_stream)
+
         # 占位 base_logits：shape 与 draft_logits 相同的全零张量
         # finalize_base_logits() 调用后会被真实值覆盖
         placeholder = torch.zeros_like(draft_logits_per_pos[0])   # [1, V]
         base_logits_placeholder: List[torch.Tensor] = [placeholder] * k
 
         logger.debug(
-            "DeferredBase propose_k=%d  tokens=%s  (Base hidden launched on Base Stream)",
+            "DeferredBase propose_k=%d  tokens=%s  (Base hidden done, sequential mode)",
             k, proposed_tokens,
         )
 
