@@ -123,6 +123,14 @@ class DeferredBaseProposer:
         self._pending_prev_logits = self._base_ctx.last_logits.clone()   # shape: [1, V]
         self._pending_k           = k
 
+        # ★ 关键同步：让 Base Stream 等待主 Stream 的当前进度。
+        #   上一轮 sync_accepted()/base_ctx.step() 在主 Stream 上写入了 base_ctx.cache，
+        #   若不同步，Base Stream 可能读到上轮写入前的旧 KV，导致 logit_base 偏差，
+        #   进而影响 C1 接受概率（即便 T=0 也会系统性偏移 acc）。
+        #   此 wait_stream 不会破坏优化目标：等待结束后主 Stream 立即进入 Target verify，
+        #   Base Stream 与 Target verify 仍真正并行。
+        self._base_stream.wait_stream(torch.cuda.current_stream())
+
         # 用 context manager 将后续 CUDA kernel 路由到 Base Stream
         with torch.cuda.stream(self._base_stream):
             # decode_batch_hidden_only 的 CUDA kernel 在 Base Stream 上异步执行
