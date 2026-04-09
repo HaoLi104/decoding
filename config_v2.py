@@ -22,8 +22,9 @@ class StrategyType(Enum):
 
 
 class ExecutionArch(Enum):
-    DUAL_STREAM  = "dual_stream"   # 架构 A：CUDA Stream 双流异步并发
-    SHADOW_SYNC  = "shadow_sync"   # 架构 B：影子同步 + Lazy LM Head
+    DUAL_STREAM   = "dual_stream"    # 架构 A：CUDA Stream 双流异步并发
+    SHADOW_SYNC   = "shadow_sync"    # 架构 B：影子同步 + Lazy LM Head
+    DEFERRED_BASE = "deferred_base"  # 架构 C：延迟 Base + CUDA Stream 并行（Base 在 Target 验证时并行执行）
 
 
 # ---------------------------------------------------------------------------

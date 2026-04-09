@@ -241,7 +241,7 @@ def _build_proposer(
     arch: ExecutionArch,
     orch: TriModelOrchestrator,
     device: torch.device,
-) -> DualStreamProposer | ShadowSyncProposer:
+):
     """根据架构枚举构造对应的提案引擎。"""
     if arch == ExecutionArch.DUAL_STREAM:
         return DualStreamProposer(
@@ -251,6 +251,13 @@ def _build_proposer(
         )
     elif arch == ExecutionArch.SHADOW_SYNC:
         return ShadowSyncProposer(
+            draft_ctx=orch.draft_ctx,
+            base_ctx=orch.base_ctx,
+            device=device,
+        )
+    elif arch == ExecutionArch.DEFERRED_BASE:
+        from deferred_base_engine import DeferredBaseProposer
+        return DeferredBaseProposer(
             draft_ctx=orch.draft_ctx,
             base_ctx=orch.base_ctx,
             device=device,

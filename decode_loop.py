@@ -179,6 +179,14 @@ class SpeculativeDecodeLoop:
             )  # len = gamma_now，每个 shape: [1, V]
 
             # -------------------------------------------------------
+            # Step 2.5：架构 C（DeferredBase）同步 Base Stream
+            # 此时 Target verify 已结束，Base 在副 Stream 上已并行执行完毕（或即将完成）
+            # wait_stream 阻塞时间趋近于零；同步后 result 的 base_logits_per_pos 被填充
+            # -------------------------------------------------------
+            if hasattr(self._proposer, "finalize_base_logits"):
+                self._proposer.finalize_base_logits(proposal)
+
+            # -------------------------------------------------------
             # Step 3：逐位验收（Strategy Routing）
             # -------------------------------------------------------
             accepted_tokens_this_round, first_reject_pos, round_results = (
