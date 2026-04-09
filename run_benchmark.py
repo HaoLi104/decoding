@@ -780,7 +780,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--base_model",   default=None, help="Base 模型路径")
 
     # 解码参数
-    p.add_argument("--arch",     choices=["dual_stream", "shadow_sync"], default="shadow_sync")
+    p.add_argument("--arch",     choices=["dual_stream", "shadow_sync", "deferred_base"], default="shadow_sync")
     p.add_argument("--gamma",    type=int,   default=5,   help="投机窗口长度 K")
     p.add_argument("--max_new_tokens", type=int, default=256)
 
