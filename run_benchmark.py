@@ -771,7 +771,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # 数据集
     p.add_argument("--dataset", choices=["medqa", "jecqa", "gsm8k", "medmcqa"], default="medqa")
     p.add_argument("--subject", default="", help="medmcqa 专用：按 subject_name 过滤（如 Surgery）")
-    p.add_argument("--split",   default="test")
+    p.add_argument("--split",   default=None,
+                   help="数据集分片（默认 None：medmcqa→validation，其余→test）")
     p.add_argument("--limit",   type=int, default=300)
 
     # 模型路径（可覆盖默认值）
@@ -924,9 +925,11 @@ def main() -> None:
         device=device,
     )
 
-    # 加载数据集
-    logger.info("=== 加载数据集: %s  limit=%d ===", args.dataset, args.limit)
-    dataset = _load_dataset(args.dataset, limit=args.limit, split=args.split,
+    # 加载数据集（split 默认值按数据集类型自动推断）
+    _split_default = {"medmcqa": "validation"}.get(args.dataset, "test")
+    split = args.split if args.split is not None else _split_default
+    logger.info("=== 加载数据集: %s  limit=%d  split=%s ===", args.dataset, args.limit, split)
+    dataset = _load_dataset(args.dataset, limit=args.limit, split=split,
                             subject=getattr(args, "subject", ""))
     logger.info("加载完成，共 %d 条", len(dataset))
 
