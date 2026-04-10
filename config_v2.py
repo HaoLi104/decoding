@@ -17,8 +17,9 @@ class StrategyType(Enum):
     STANDARD_SD       = "standard_sd"        # 策略 A：标准投机解码
     HARD_OVERRIDE_B0  = "hard_override_b0"   # 策略 B0：离散 argmax 对比强制放行
     HARD_OVERRIDE_B   = "hard_override_b"    # 策略 B：连续 ΔP 阈值硬覆盖
-    SOFT_GUIDANCE_C1  = "soft_guidance_c1"   # 策略 C1：概率层线性补偿
+    SOFT_GUIDANCE_C1  = "soft_guidance_c1"   # 策略 C1：概率层加法（比值域补偿）
     SOFT_GUIDANCE_C2  = "soft_guidance_c2"   # 策略 C2：Logit 层 Z-score 残差注入
+    SOFT_GUIDANCE_C3  = "soft_guidance_c3"   # 策略 C3：Target 概率局部校准（概率域直接补贴）
 
 
 class ExecutionArch(Enum):

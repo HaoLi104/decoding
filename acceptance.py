@@ -1,12 +1,13 @@
 """
-验收策略层 — 5 种策略的解耦实现 + 工厂函数
+验收策略层 — 6 种策略的解耦实现 + 工厂函数
 
 对应实验计划 Section 4 Step 3 的 Strategy Routing：
-  StandardSD          策略 A：标准投机解码，概率比值验收
-  OriginalHardOverride 策略 B0：离散 argmax 对比强制放行
+  StandardSD            策略 A：标准投机解码，概率比值验收
+  OriginalHardOverride  策略 B0：离散 argmax 对比强制放行
   ThresholdHardOverride 策略 B：连续 ΔP 阈值硬覆盖
-  SoftGuidanceC1      策略 C1：概率层线性补偿
-  SoftGuidanceC2      策略 C2：Logit 层 Z-score 残差注入
+  SoftGuidanceC1        策略 C1：概率层加法（比值域补偿）
+  SoftGuidanceC2        策略 C2：Logit 层 Z-score 残差注入
+  SoftGuidanceC3        策略 C3：Target 概率局部校准（概率域直接补贴）
 
 设计原则：
   - 所有策略通过 VerifyContext 统一接受输入，通过 AcceptResult 统一输出
@@ -27,7 +28,7 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
-from config_v2 import DomainSignalParams, StrategyType
+from config_v2 import DomainSignalParams, StrategyType  # noqa: F401 (StrategyType re-exported)
 from domain_signal import (
     check_domain_condition,
     compute_delta_logit_masked,
@@ -535,6 +536,109 @@ class SoftGuidanceC2(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C3：Soft Guidance（Target 概率局部校准）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC3(AcceptanceStrategy):
+    """策略 C3：Target 概率局部校准（Local Probability Calibration）。
+
+    两步分解，量纲完全一致：
+
+      Step 1 — 局部校准（在概率域注入领域补贴）：
+          P'_target(x) = P_target(x) + α · ΔP
+          物理意义：ΔP 作为"概率补贴（Probability Subsidy）"直接叠加到 Target 的原始概率上，
+          形成融合了领域知识的虚拟 Target 概率 P'_target。
+
+      Step 2 — 标准投机解码验收（回归经典框架）：
+          P'_accept = min(1, P'_target(x) / P_draft(x))
+          完全等价于用 P'_target 代替 P_target 走一遍 Standard SD。
+
+    与 C1 的区别（量纲一致性）：
+      C1: P'_accept = min(1, P_target/P_draft  +  α·ΔP)
+          ← 在"比值"维度相加，α·ΔP 与 P_target/P_draft（无量纲比值）量纲不同
+      C3: P'_accept = min(1, (P_target + α·ΔP) / P_draft)
+          ← 在"概率"维度相加，分子分母均为概率 [0,1]，α·ΔP 量纲与 P_target 一致
+
+    贪婪模式（t_sample=0）的确定性判据：
+      接受当且仅当 P'_target(x) ≥ P_draft(x)，即 p_accept_prime ≥ 1.0。
+      拒绝时回退到 argmax(logit_target)（与 StandardSD 贪婪一致）。
+    """
+
+    def __init__(self, alpha: float, signal_params: DomainSignalParams) -> None:
+        self._alpha  = alpha
+        self._params = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+        p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c3_draft_prob_zero",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+        # Step 1: 概率域局部校准 — P'_target(x) = P_target(x) + α · ΔP
+        # p_target_prime 可能超过 1；min(1, ...) 在 Step 2 中由 p_accept_prime 完成
+        p_target_prime = p_target + self._alpha * delta_p  # float，概率域线性叠加
+
+        # Step 2: 标准 SD 验收 — P'_accept = min(1, P'_target / P_draft)
+        p_accept_prime = min(1.0, p_target_prime / p_draft)
+
+        # 贪婪模式（t_sample=0）：确定性接受判据
+        if ctx.t_sample == 0.0:
+            if p_accept_prime >= 1.0:
+                return AcceptResult(
+                    accepted=True,
+                    chosen_token_id=x,
+                    reason="c3_greedy_subsidy_accepted",
+                    delta_p=delta_p,
+                    p_draft=p_draft,
+                    p_target=p_target_prime,
+                )
+            else:
+                chosen = _argmax_token(ctx.logit_target)
+                return AcceptResult(
+                    accepted=False,
+                    chosen_token_id=chosen,
+                    reason="c3_greedy_subsidy_rejected",
+                    delta_p=delta_p,
+                    p_draft=p_draft,
+                    p_target=p_target_prime,
+                )
+
+        # 随机采样模式（t_sample > 0）：标准概率比值随机验收
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True,
+                chosen_token_id=x,
+                reason="c3_subsidy_accepted",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target_prime,
+            )
+        else:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c3_subsidy_rejected",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target_prime,
+            )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -549,7 +653,7 @@ def create_strategy(
     Args:
         strategy_type: 策略枚举值
         signal_params: 领域信号超参数（θ_high, τ, T_fixed）
-        alpha:         C1/C2 软引导强度
+        alpha:         C1/C2/C3 软引导强度
         **kwargs:      C2 专用扩展参数：
                          c2_variant (str):  注入变体 full | onehot | topk（默认 full）
                          c2_topk    (int):  topk 变体的 K 值（默认 5）
@@ -578,6 +682,9 @@ def create_strategy(
             c2_variant=kwargs.get("c2_variant", "full"),
             c2_topk=int(kwargs.get("c2_topk", 5)),
         )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C3:
+        return SoftGuidanceC3(alpha=alpha, signal_params=signal_params)
 
     else:
         raise ValueError(f"未知策略类型: {strategy_type}")
