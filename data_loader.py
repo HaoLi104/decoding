@@ -82,7 +82,7 @@ def load_medmcqa(split: str = "validation", limit: int = 0, subject: str = None)
         cop = item.get("cop", -1)
         if cop == -1 or not (0 <= cop <= 3):
             continue
-        if subject and item.get("subject_name", "") != subject:
+        if subject and item.get("subject_name", "").lower() != subject.lower():
             continue
         rows.append({
             "question":     item["question"],
