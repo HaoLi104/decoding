@@ -1,13 +1,15 @@
 """
-验收策略层 — 6 种策略的解耦实现 + 工厂函数
+验收策略层 — 8 种策略的解耦实现 + 工厂函数
 
 对应实验计划 Section 4 Step 3 的 Strategy Routing：
   StandardSD            策略 A：标准投机解码，概率比值验收
   OriginalHardOverride  策略 B0：离散 argmax 对比强制放行
   ThresholdHardOverride 策略 B：连续 ΔP 阈值硬覆盖
-  SoftGuidanceC1        策略 C1：概率层加法（比值域补偿）
+  SoftGuidanceC1        策略 C1：概率层加法（比值域补偿，固定 α）
   SoftGuidanceC2        策略 C2：Logit 层 Z-score 残差注入
   SoftGuidanceC3        策略 C3：Target 概率局部校准（概率域直接补贴）
+  SoftGuidanceC4        策略 C4：Draft 领域自信度动态门控（Confidence-Gated α）
+  SoftGuidanceC5        策略 C5：Target 认知不确定性驱动路由（Entropy-Aware α）
 
 设计原则：
   - 所有策略通过 VerifyContext 统一接受输入，通过 AcceptResult 统一输出
@@ -639,6 +641,203 @@ class SoftGuidanceC3(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C4：Soft Guidance（Draft 领域自信度动态门控）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC4(AcceptanceStrategy):
+    """策略 C4：基于 Draft 领域自信度的动态门控（Confidence-Gated α）。
+
+    核心直觉：只有当 Draft"大幅领先"Base 时（专家极度自信且分歧显著），
+    才激活领域注入；否则退化为 StandardSD，保护 Target 的通用流利度。
+
+    信号强度定义：
+        S_t = max(P_draft) - max(P_base)
+
+    动态 α 计算（稀疏激活）：
+        α_t = α_base · I(S_t > τ) · S_t
+
+    论文故事（Sparse Activation）：
+        - 当 Draft 与 Base 的最高置信预测差值 S_t 超过阈值 τ 时，
+          才触发领域辅助（稀疏）；α_t 与 S_t 成正比，信号越强注入越大。
+        - S_t ≤ τ 时 α_t = 0，策略完全退化为 StandardSD，
+          证明本框架不是"全程劫持"，而是精准的"领域急转弯响应"机制。
+
+    完整验收公式（沿用 C1 的比值域加法框架）：
+        P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP)
+
+    超参数：
+        alpha_base (--alpha): 信号强度放大系数 α_base（论文 λ 参数）
+        c4_tau (--c4_tau):    激活阈值 τ（默认 0.1）
+    """
+
+    def __init__(
+        self,
+        alpha_base:    float,
+        c4_tau:        float,
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._alpha_base   = alpha_base
+        self._tau          = c4_tau
+        self._params       = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        # ── 计算信号强度 S_t = max(P_draft) - max(P_base) ──────────────
+        p_draft_full = F.softmax(ctx.logit_draft / t, dim=-1)  # shape: [1, V_draft]
+        p_base_full  = F.softmax(ctx.logit_base  / t, dim=-1)  # shape: [1, V_base]
+        s_t = float(p_draft_full.max().item()) - float(p_base_full.max().item())
+
+        # ── 稀疏激活：动态 α ─────────────────────────────────────────────
+        # α_t = α_base · I(S_t > τ) · S_t
+        alpha_t = self._alpha_base * s_t if s_t > self._tau else 0.0
+
+        # ── 计算 ΔP 与各模型对 draft token 的概率 ───────────────────────
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+        p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c4_draft_prob_zero",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+        # ── C1 公式 + 动态 α ─────────────────────────────────────────────
+        # P'_accept = min(1, P_target/P_draft + α_t · ΔP)
+        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+
+        reason_tag = "gated" if alpha_t > 0.0 else "passthrough"
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True,
+                chosen_token_id=x,
+                reason=f"c4_{reason_tag}_accepted",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+        else:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason=f"c4_{reason_tag}_rejected",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+
+# ---------------------------------------------------------------------------
+# 策略 C5：Soft Guidance（Target 认知不确定性驱动路由）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC5(AcceptanceStrategy):
+    """策略 C5：基于 Target 认知不确定性的动态门控（Entropy-Aware α）。
+
+    核心直觉：Target 的输出熵是其"自信程度"的天然量化器。
+    熵低（尖锐分布）→ Target 确定，不需要外援；
+    熵高（平坦分布）→ Target 面对知识盲区，允许 Draft 趁虚而入。
+
+    香农熵计算：
+        H_t = -∑ P_target(x) · log P_target(x)
+
+    最大熵归一化（词表均匀分布时熵最大）：
+        H_max = log(V)   （V = Target 词表大小）
+
+    动态 α 计算：
+        α_t = λ · H_t / H_max
+
+    论文故事（Uncertainty-Driven Routing）：
+        - Target 遇到通用语法/事实，熵低（确定），α_t → 0，Draft 闲置；
+        - Target 遇到医学专有名词/临床推理，熵高（懵逼），α_t → λ，
+          Draft 的领域先验被最大程度引入，实现"按需路由"。
+        - λ（即 --alpha）控制最大注入强度上限。
+
+    完整验收公式（沿用 C1 的比值域加法框架）：
+        P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP)
+
+    超参数：
+        lambda (--alpha): 最大注入强度 λ（H_t/H_max=1 时退化为 C1 的 α）
+    """
+
+    def __init__(
+        self,
+        lam:           float,          # λ，对应 CLI --alpha
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._lam    = lam
+        self._params = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        # ── 计算 Target 输出分布的香农熵 H_t ────────────────────────────
+        p_target_full = F.softmax(ctx.logit_target / t, dim=-1)  # shape: [1, V_target]
+        # 数值稳定：log(p + ε) 避免 log(0)
+        h_t = float(
+            -torch.sum(p_target_full * torch.log(p_target_full + 1e-12)).item()
+        )
+        # H_max = log(V)，词表均匀时的理论最大熵
+        h_max = math.log(p_target_full.shape[-1])  # ≈ log(152064) ≈ 11.93
+
+        # ── 动态 α：α_t = λ · H_t / H_max ──────────────────────────────
+        # H_t / H_max ∈ [0, 1]，α_t ∈ [0, λ]
+        alpha_t = self._lam * (h_t / h_max)
+
+        # ── 计算 ΔP 与各模型对 draft token 的概率 ───────────────────────
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+        p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c5_draft_prob_zero",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+        # ── C1 公式 + 熵驱动 α ──────────────────────────────────────────
+        # P'_accept = min(1, P_target/P_draft + α_t · ΔP)
+        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True,
+                chosen_token_id=x,
+                reason="c5_entropy_routed_accepted",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+        else:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c5_entropy_routed_rejected",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -653,10 +852,11 @@ def create_strategy(
     Args:
         strategy_type: 策略枚举值
         signal_params: 领域信号超参数（θ_high, τ, T_fixed）
-        alpha:         C1/C2/C3 软引导强度
-        **kwargs:      C2 专用扩展参数：
-                         c2_variant (str):  注入变体 full | onehot | topk（默认 full）
-                         c2_topk    (int):  topk 变体的 K 值（默认 5）
+        alpha:         C1/C2/C3/C4/C5 软引导强度
+        **kwargs:      策略专用扩展参数：
+                         c2_variant (str):  C2 注入变体 full | onehot | topk（默认 full）
+                         c2_topk    (int):  C2 topk 变体的 K 值（默认 5）
+                         c4_tau     (float): C4 动态门控阈值 τ（默认 0.1）
 
     Returns:
         AcceptanceStrategy 子类实例
@@ -685,6 +885,16 @@ def create_strategy(
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C3:
         return SoftGuidanceC3(alpha=alpha, signal_params=signal_params)
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C4:
+        return SoftGuidanceC4(
+            alpha_base=alpha,
+            c4_tau=float(kwargs.get("c4_tau", 0.1)),
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C5:
+        return SoftGuidanceC5(lam=alpha, signal_params=signal_params)
 
     else:
         raise ValueError(f"未知策略类型: {strategy_type}")

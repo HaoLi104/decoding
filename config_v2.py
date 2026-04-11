@@ -20,6 +20,8 @@ class StrategyType(Enum):
     SOFT_GUIDANCE_C1  = "soft_guidance_c1"   # 策略 C1：概率层加法（比值域补偿）
     SOFT_GUIDANCE_C2  = "soft_guidance_c2"   # 策略 C2：Logit 层 Z-score 残差注入
     SOFT_GUIDANCE_C3  = "soft_guidance_c3"   # 策略 C3：Target 概率局部校准（概率域直接补贴）
+    SOFT_GUIDANCE_C4  = "soft_guidance_c4"   # 策略 C4：Draft 领域自信度动态门控（Confidence-Gated α）
+    SOFT_GUIDANCE_C5  = "soft_guidance_c5"   # 策略 C5：Target 认知不确定性驱动路由（Entropy-Aware α）
 
 
 class ExecutionArch(Enum):
@@ -87,6 +89,8 @@ class DecodeConfig:
     # C2 专用：注入变体与 Top-K 参数
     c2_variant:      str   = "full"  # "full" | "onehot" | "topk"
     c2_topk:         int   = 5       # topk 变体的 K 值
+    # C4 专用：动态门控阈值 τ（信号强度 S_t = max(P_draft) - max(P_base) 的触发阈值）
+    c4_tau:          float = 0.1     # 低于此阈值时 α_t = 0（稀疏激活）
 
 
 # ---------------------------------------------------------------------------

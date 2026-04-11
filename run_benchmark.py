@@ -510,6 +510,7 @@ def run_single_config(
         alpha=config.alpha,
         c2_variant=config.c2_variant,
         c2_topk=config.c2_topk,
+        c4_tau=config.c4_tau,
     )
 
     config_tag = (
@@ -662,8 +663,9 @@ def run_grid_search(
     gamma:        int,
     max_new_tokens: int,
     out_dir:      Path,
-    c2_variant:   str = "full",
-    c2_topk:      int = 5,
+    c2_variant:   str   = "full",
+    c2_topk:      int   = 5,
+    c4_tau:       float = 0.1,
 ) -> List[BenchmarkResult]:
     """Strategy × α × T_sample 的正交网格搜索。
 
@@ -698,6 +700,7 @@ def run_grid_search(
                     alpha=actual_alpha,
                     c2_variant=c2_variant,
                     c2_topk=c2_topk,
+                    c4_tau=c4_tau,
                 )
                 result = run_single_config(
                     config=cfg,
@@ -844,6 +847,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=5,
         help="C2 topk 变体的 K 值，即 Draft 输出保留的 Top-K Token 数（默认 5）",
     )
+    p.add_argument(
+        "--c4_tau",
+        type=float,
+        default=0.1,
+        help=(
+            "C4 动态门控阈值 τ（仅对 soft_guidance_c4 生效）：\n"
+            "  S_t = max(P_draft) - max(P_base)\n"
+            "  当 S_t > τ 时才激活领域注入，否则 α_t=0（稀疏激活，默认 0.1）"
+        ),
+    )
 
     p.add_argument(
         "--aggregate_summaries_only",
@@ -982,6 +995,7 @@ def main() -> None:
         out_dir=out_dir,
         c2_variant=args.c2_variant,
         c2_topk=args.c2_topk,
+        c4_tau=args.c4_tau,
     )
 
     # 与目录内已有单配置 summary 合并（续跑时 summary_table 含全部实验）
