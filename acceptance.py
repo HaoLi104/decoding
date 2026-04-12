@@ -1,5 +1,5 @@
 """
-验收策略层 — 8 种策略的解耦实现 + 工厂函数
+验收策略层 — 9 种策略的解耦实现 + 工厂函数
 
 对应实验计划 Section 4 Step 3 的 Strategy Routing：
   StandardSD            策略 A：标准投机解码，概率比值验收
@@ -10,6 +10,7 @@
   SoftGuidanceC3        策略 C3：Target 概率局部校准（概率域直接补贴）
   SoftGuidanceC4        策略 C4：Draft 领域自信度动态门控（Confidence-Gated α）
   SoftGuidanceC5        策略 C5：Target 认知不确定性驱动路由（Entropy-Aware α）
+  SoftGuidanceC6        策略 C6：双信号联合门控（C4 × C5，Draft 自信 AND Target 懵逼）
 
 设计原则：
   - 所有策略通过 VerifyContext 统一接受输入，通过 AcceptResult 统一输出
@@ -838,6 +839,117 @@ class SoftGuidanceC5(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C6：Soft Guidance（双信号联合门控：C4 × C5）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC6(AcceptanceStrategy):
+    """策略 C6：双信号联合门控（Dual-Signal Gated α）。
+
+    C4 和 C5 的信号正交（一个来自 Draft-Base 外部对比，一个来自 Target 内部不确定性），
+    将两者相乘得到联合动态 α：
+
+        α_t = λ · I(S_t > τ) · S_t · (H_t / H_max)
+
+    物理解读（双重 AND 门）：
+      - S_t ≤ τ → α_t = 0：Draft 无显著领域优势，完全不注入（C4 门关闭）
+      - H_t ≈ 0 → α_t ≈ 0：Target 对该 token 极度自信，无需外援（C5 权重接近 0）
+      - S_t > τ AND H_t 高 → α_t = λ·S_t·(H_t/H_max)：Draft 自信 + Target 懵逼，
+        "两个条件同时满足"才强力注入，最大程度减少误触发，精准攻击领域盲区。
+
+    论文故事（Dual-Signal Routing）：
+        C4 是"专家主动举手"（Draft 自信超过 Base），
+        C5 是"学生主动求助"（Target 遇到知识盲区）。
+        C6 只在两者同时成立时才触发领域引导，实现最精准的"按需注入"。
+
+    完整验收公式（沿用 C1 的比值域加法框架）：
+        P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP)
+
+    超参数：
+        lambda  (--alpha): 联合信号的最大注入强度 λ
+        c4_tau  (--c4_tau): C4 门的激活阈值 τ（默认 0.1）
+    """
+
+    def __init__(
+        self,
+        lam:           float,          # λ，对应 CLI --alpha
+        c4_tau:        float,          # τ，C4 稀疏激活阈值
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._lam    = lam
+        self._tau    = c4_tau
+        self._params = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        # ── C4 信号：S_t = max(P_draft) - max(P_base) ────────────────────
+        p_draft_full = F.softmax(ctx.logit_draft / t, dim=-1)  # [1, V_draft]
+        p_base_full  = F.softmax(ctx.logit_base  / t, dim=-1)  # [1, V_base]
+        s_t = float(p_draft_full.max().item()) - float(p_base_full.max().item())
+
+        # C4 稀疏激活：S_t ≤ τ 时直接置零（Draft 无显著优势，关闭注入）
+        c4_factor = s_t if s_t > self._tau else 0.0
+
+        # ── C5 信号：H_t / H_max（Target 输出熵归一化） ───────────────────
+        p_target_full = F.softmax(ctx.logit_target / t, dim=-1)  # [1, V_target]
+        h_t = float(
+            -torch.sum(p_target_full * torch.log(p_target_full + 1e-12)).item()
+        )
+        h_max = math.log(p_target_full.shape[-1])  # log(V) ≈ 11.93
+        c5_factor = h_t / h_max  # ∈ [0, 1]
+
+        # ── 联合动态 α：两信号相乘 ────────────────────────────────────────
+        # α_t = λ · I(S_t > τ) · S_t · (H_t / H_max)
+        alpha_t = self._lam * c4_factor * c5_factor
+
+        # ── 计算 ΔP 与各模型对 draft token 的概率 ───────────────────────
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+        p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c6_draft_prob_zero",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+        # ── C1 框架：比值域加法 + 联合动态 α ─────────────────────────────
+        # P'_accept = min(1, P_target/P_draft + α_t · ΔP)
+        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+
+        # 判断是否触发（用于 reason tag，方便遥测分析）
+        dual_triggered = c4_factor > 0.0  # C4 门已开，C5 连续权重始终参与
+        reason_tag = "dual_gated" if dual_triggered else "passthrough"
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True,
+                chosen_token_id=x,
+                reason=f"c6_{reason_tag}_accepted",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+        else:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason=f"c6_{reason_tag}_rejected",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -895,6 +1007,13 @@ def create_strategy(
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C5:
         return SoftGuidanceC5(lam=alpha, signal_params=signal_params)
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C6:
+        return SoftGuidanceC6(
+            lam=alpha,
+            c4_tau=float(kwargs.get("c4_tau", 0.1)),
+            signal_params=signal_params,
+        )
 
     else:
         raise ValueError(f"未知策略类型: {strategy_type}")
