@@ -282,71 +282,131 @@ def analyze_and_report(records: list, out_dir: Path):
     else:
         logger.info("\n【2. ΔP 未计算（--no_delta 模式），跳过领域词位置对比】")
 
-    # ── 3. 错题中高熵 token 分析 ─────────────────────────────────────────
-    logger.info("\n【3. 错题高熵 Token 分析（H > μ+σ，ΔP > 0，token 长度 ≥ 3）】")
+    # ── 3. 错题中高熵 token 分析（纯熵驱动，ΔP 作辅助验证，不作筛选条件）────
+    # 逻辑：先用 Target 香农熵找出 Target 最不确定的位置，
+    #       再去看这些位置上是什么词，验证其是否与领域知识相关。
+    #       ΔP 只作为辅助展示，证明熵高位置与领域信号的相关性。
+    logger.info(
+        "\n【3. 错题高熵 Token 分析（纯熵驱动：H > μ+σ，过滤停用词，ΔP 仅作辅助验证）】"
+    )
+
+    # 英文停用词表（功能词、连接词、副词等非实义词，不属于领域知识词汇）
+    STOP_WORDS = {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "shall", "can", "not", "no", "nor",
+        "that", "this", "these", "those", "it", "its", "which", "who", "what",
+        "how", "when", "where", "why", "and", "or", "but", "so", "yet", "for",
+        "of", "in", "on", "at", "to", "by", "with", "from", "as", "into",
+        "than", "then", "thus", "such", "also", "both", "either", "while",
+        "making", "often", "typically", "commonly", "primarily", "generally",
+        "usually", "providing", "preserving", "provides", "provide", "during",
+        "often", "however", "therefore", "although", "because", "since",
+        "between", "through", "after", "before", "about", "over", "under",
+        "more", "most", "less", "least", "very", "just", "only", "even",
+        "each", "all", "any", "some", "other", "another", "same", "different",
+        "new", "first", "second", "third", "one", "two", "three", "four",
+        "they", "their", "them", "we", "our", "you", "your", "he", "she",
+        "his", "her", "who", "whom", "whose", "there", "here", "where",
+        "when", "while", "though", "whether", "both", "either", "neither",
+        "without", "within", "along", "across", "among", "between",
+    }
+
     token_stats = defaultdict(lambda: {"count": 0, "H": [], "Hn": [], "dP": []})
     examples    = []
 
     if incorrect_recs:
         all_H    = [H for r in incorrect_recs for H in r["entropies"]]
         H_thresh = np.mean(all_H) + np.std(all_H)
-        logger.info(f"  高熵阈值 H > {H_thresh:.4f} nats")
+        logger.info(f"  高熵阈值 H > {H_thresh:.4f} nats（错题熵的 μ+σ）")
+        logger.info(f"  筛选条件：① H > 阈值（Target 最不确定的位置）"
+                    f"  ② 非英文停用词  ③ token 长度 ≥ 3")
+        logger.info(f"  ΔP 作为辅助展示（非筛选条件）：验证高熵位置是否同时具有领域信号")
 
         for r in incorrect_recs:
             for step, (tok, H, Hn, dp) in enumerate(
                 zip(r["token_strs"], r["entropies"], r["norm_entropies"], r["delta_ps"])
             ):
-                if H > H_thresh and (dp > 0 or not has_delta):
-                    tok_clean = tok.strip()
-                    if len(tok_clean) >= 3:
-                        token_stats[tok_clean]["count"] += 1
-                        token_stats[tok_clean]["H"].append(H)
-                        token_stats[tok_clean]["Hn"].append(Hn)
-                        token_stats[tok_clean]["dP"].append(dp)
+                tok_clean = tok.strip()
+                # 筛选条件：仅用 Target 熵 + 非停用词过滤，ΔP 不参与筛选
+                if (H > H_thresh
+                        and len(tok_clean) >= 3
+                        and tok_clean.lower() not in STOP_WORDS):
+                    token_stats[tok_clean]["count"] += 1
+                    token_stats[tok_clean]["H"].append(H)
+                    token_stats[tok_clean]["Hn"].append(Hn)
+                    token_stats[tok_clean]["dP"].append(dp)   # 仅记录，不筛选
 
-                        if len(examples) < 100:
-                            ctx_start = max(0, step - 5)
-                            ctx_end   = min(len(r["token_strs"]), step + 6)
-                            ctx       = "".join(r["token_strs"][ctx_start:ctx_end])
-                            examples.append({
-                                "q_idx":   r["idx"],
-                                "token":   tok_clean,
-                                "H":       round(H, 4),
-                                "H_norm":  round(Hn, 4),
-                                "dP":      round(dp, 4),
-                                "context": ctx,
-                                "correct_label": r["correct_label"],
-                                "pred_label":    r["pred_label"],
-                            })
+                    if len(examples) < 100:
+                        ctx_start = max(0, step - 5)
+                        ctx_end   = min(len(r["token_strs"]), step + 6)
+                        ctx       = "".join(r["token_strs"][ctx_start:ctx_end])
+                        examples.append({
+                            "q_idx":        r["idx"],
+                            "token":        tok_clean,
+                            "H":            round(H, 4),
+                            "H_norm":       round(Hn, 4),
+                            "dP":           round(dp, 4),
+                            "context":      ctx,
+                            "correct_label": r["correct_label"],
+                            "pred_label":    r["pred_label"],
+                        })
 
         sorted_toks = sorted(
             token_stats.items(), key=lambda x: x[1]["count"], reverse=True
         )
 
-        logger.info(f"  满足条件的唯一 token 种数: {len(token_stats)}")
-        logger.info(f"\n  Top-25 高熵领域候选 Token:")
-        header = f"  {'Token':<28} {'次数':>6} {'均值H':>9} {'H/Hmax':>8} {'均值ΔP':>9}"
+        # ── 高熵实义词是否具有领域信号？计算 ΔP 分布作为验证 ──────────────────
+        all_high_H_dp   = [dp for info in token_stats.values() for dp in info["dP"]]
+        # 对照：全量 token 位置的 ΔP 均值
+        all_dp_baseline = [dp for r in incorrect_recs for dp in r["delta_ps"]]
+
+        logger.info(f"\n  满足条件的唯一实义 token 种数: {len(token_stats)}")
+
+        if has_delta and all_high_H_dp and all_dp_baseline:
+            logger.info(f"\n  ── ΔP 辅助验证（熵驱动选出的实义词，ΔP 是否偏高？）──")
+            logger.info(f"  高熵实义词位置  均值ΔP = {np.mean(all_high_H_dp):.4f}")
+            logger.info(f"  所有位置（基准）均值ΔP = {np.mean(all_dp_baseline):.4f}")
+            ratio = np.mean(all_high_H_dp) / (np.mean(all_dp_baseline) + 1e-9)
+            logger.info(f"  比值 = {ratio:.2f}×  （>1 说明高熵实义词位置更倾向于领域词）")
+
+        logger.info(f"\n  Top-25 高熵实义词（Target 最困惑的非停用词位置）：")
+        logger.info(f"  说明：均值ΔP 为辅助信息——ΔP 越高，该词越可能是领域专知词汇")
+        header = f"  {'Token':<28} {'次数':>6} {'均值H':>9} {'H/Hmax':>8} {'均值ΔP':>9} {'领域信号':>8}"
         logger.info(header)
-        logger.info("  " + "-" * 65)
+        logger.info("  " + "-" * 75)
         for tok, info in sorted_toks[:25]:
+            mean_dp  = float(np.mean(info["dP"]))
+            is_domain = "★" if mean_dp > 0.05 else "·"   # 辅助标记：ΔP>0.05 视为有领域信号
             logger.info(
                 f"  {tok:<28} {info['count']:>6} "
                 f"{np.mean(info['H']):>9.4f} "
                 f"{np.mean(info['Hn']):>8.4f} "
-                f"{np.mean(info['dP']):>9.4f}"
+                f"{mean_dp:>9.4f} "
+                f"{is_domain:>8}"
             )
+
+        logger.info(f"\n  图例：★ = 均值ΔP > 0.05（有领域信号）  · = 通用词")
 
         # 保存高熵 token 报告
         token_report = {
-            "H_threshold":   float(H_thresh),
-            "H_max_ref":     float(H_max_ref),
+            "H_threshold":            float(H_thresh),
+            "H_max_ref":              float(H_max_ref),
+            "filter_note": (
+                "仅用 Target 香农熵筛选（H > μ+σ）+ 停用词过滤。"
+                "ΔP 为辅助验证字段，不参与筛选。"
+                "均值ΔP > 0.05 的 token 标注 domain_signal=True。"
+            ),
+            "high_H_dp_mean":         float(np.mean(all_high_H_dp))    if all_high_H_dp    else 0,
+            "baseline_dp_mean":       float(np.mean(all_dp_baseline))  if all_dp_baseline  else 0,
             "top_tokens": [
                 {
-                    "token":    tok,
-                    "count":    info["count"],
-                    "mean_H":   float(np.mean(info["H"])),
-                    "mean_Hn":  float(np.mean(info["Hn"])),
-                    "mean_dP":  float(np.mean(info["dP"])),
+                    "token":        tok,
+                    "count":        info["count"],
+                    "mean_H":       float(np.mean(info["H"])),
+                    "mean_Hn":      float(np.mean(info["Hn"])),
+                    "mean_dP":      float(np.mean(info["dP"])),
+                    "domain_signal": float(np.mean(info["dP"])) > 0.05,
                 }
                 for tok, info in sorted_toks[:100]
             ],
