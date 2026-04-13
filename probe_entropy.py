@@ -58,18 +58,19 @@ CHOICE_LABELS = ["A", "B", "C", "D"]
 # 数据工具：直接复用 data_loader.load_medmcqa（使用正确的缓存路径）
 # ──────────────────────────────────────────────────────────────────────────────
 
-def load_surgery_data(limit: int):
+def load_surgery_data(limit: int, subject: str = "Surgery"):
     """
-    复用 data_loader.load_medmcqa 加载 Surgery 子集。
+    复用 data_loader.load_medmcqa 加载指定科目子集。
     返回的每条记录格式：
       item["question"]   str
       item["options"]    dict  {"A": ..., "B": ..., "C": ..., "D": ...}
       item["answer_idx"] str   "A"/"B"/"C"/"D"
+    subject=None 时加载全量（不按科目过滤）。
     """
     from data_loader import load_medmcqa
-    logger.info("Loading MedMCQA Surgery validation set via data_loader...")
-    ds = load_medmcqa(split="validation", limit=limit, subject="Surgery")
-    logger.info(f"Loaded {len(ds)} Surgery questions")
+    logger.info(f"Loading MedMCQA validation set, subject={subject or 'ALL'}...")
+    ds = load_medmcqa(split="validation", limit=limit, subject=subject)
+    logger.info(f"Loaded {len(ds)} questions (subject={subject or 'ALL'})")
     return list(ds)
 
 
@@ -501,7 +502,7 @@ def main(args):
         logger.info("--no_delta 模式：仅用 Target，不计算 ΔP（速度更快）")
 
     # ── 加载数据 ───────────────────────────────────────────────────────────
-    items = load_surgery_data(args.limit)
+    items = load_surgery_data(args.limit, subject=args.subject)
 
     # ── 主循环：逐题生成并记录熵 ──────────────────────────────────────────
     records = []
@@ -566,6 +567,8 @@ if __name__ == "__main__":
                         help="每题最大生成 token 数")
     parser.add_argument("--no_delta", action="store_true",
                         help="不加载 Draft/Base，不计算 ΔP（速度约快 3×）")
+    parser.add_argument("--subject",  type=str,  default="Surgery",
+                        help="MedMCQA 科目过滤（如 Surgery/Pharmacology/Anatomy，空字符串=全量）")
     parser.add_argument("--out_dir",  type=str,  default="results/entropy_analysis",
                         help="输出目录")
     args = parser.parse_args()
