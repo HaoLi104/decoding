@@ -1,29 +1,32 @@
 #!/usr/bin/env python3
 """
-probe_entropy.py — Target 模型 Shannon 熵分布分析
+probe_entropy.py — Target 模型 Shannon 熵分布分析 + Draft 延续词探针
 
 实验目标：
   1. 对比做对 / 做错题目的序列平均熵（预期：错题熵更高，Target 更不确定）
   2. 对比领域词位置（ΔP > 阈值）vs 通用词位置的逐步熵
-  3. 从错题的高熵 token 中找出与领域知识相关的候选词
+  3. 从错题高熵位置找出 Target 最困惑的实义词（纯熵驱动，ΔP 作辅助验证）
+  4. Draft 延续词探针：在 Target 高熵位置，让 Draft 贪婪续 3 token，
+     揭示 Draft 在该决策分叉口所拥有的领域知识
 
 输出文件（--out_dir）：
-  entropy_records.json       — 每题的逐步熵、ΔP、生成文本原始记录
-  summary.json               — 核心统计数字（用于论文表格）
-  high_entropy_tokens.json   — 错题中高熵且高 ΔP 的 token Top 列表
-  entropy_analysis.png       — 可视化图（需 matplotlib）
+  entropy_records.json          — 每题的逐步熵、ΔP、生成文本原始记录
+  summary.json                  — 核心统计数字（用于论文表格）
+  high_entropy_tokens.json      — 错题高熵实义词 Top 列表（纯熵驱动）
+  draft_continuation_probe.json — Draft 在 Target 高熵位置的延续词报告
+  entropy_analysis.png          — 可视化图（需 matplotlib）
 
-运行命令（远端）：
+运行命令（远端，需同时加载 Draft）：
   cd /data/ocean/decoding && git pull
   export CUDA_VISIBLE_DEVICES=0 HF_DATASETS_OFFLINE=1
-  python probe_entropy.py --limit 100 --max_new 150 --out_dir results/entropy_analysis
+  python probe_entropy.py --limit 100 --max_new 150 --out_dir results/entropy_surgery_full
 
-  # 仅用 Target 运行（不计算 ΔP，速度更快，约 1/3 时间）：
+  # 仅用 Target（不计算 ΔP，不运行 Draft 探针，速度约快 3×）：
   python probe_entropy.py --limit 100 --max_new 150 --no_delta --out_dir results/entropy_target_only
 
 查看结果：
-  cat results/entropy_analysis/summary.json
-  cat results/entropy_analysis/high_entropy_tokens.json | python -m json.tool | head -80
+  cat results/entropy_surgery_full/summary.json
+  python -m json.tool results/entropy_surgery_full/draft_continuation_probe.json | head -80
 """
 
 import argparse
@@ -223,10 +226,173 @@ def generate_with_entropy(
     }
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Draft 延续词探针（核心新增）
+# ──────────────────────────────────────────────────────────────────────────────
+
+@torch.no_grad()
+def collect_draft_continuations(
+    model_draft,
+    tokenizer,
+    incorrect_recs: list,
+    prompt_ids_list: list,      # List[Tensor]，每个 [1, prompt_len]，在 CPU 上
+    H_thresh: float,
+    device: str,
+    k: int = 3,
+    max_probes_per_q: int = 10, # 每道题最多探针次数（取熵最高的 top-N 位置）
+) -> list:
+    """
+    对每道错题，在 Target 高熵位置（H > H_thresh）让 Draft 从同一上下文贪婪续 k token，
+    揭示 Draft 在该"决策分叉口"所拥有的领域知识。
+
+    优化：对每道题只做一次 Draft prefill，逐步推进 KV Cache；
+         高熵位置到来时 clone KV 再做 k 步探针，避免反复 prefill。
+
+    Returns list of events:
+        q_idx, step, H_target, target_token,
+        context_prefix, draft_continuation (list[str]), draft_continuation_text (str)
+    """
+    events = []
+
+    for rec_idx, (r, prompt_ids) in enumerate(zip(incorrect_recs, prompt_ids_list)):
+        gen_ids   = r["generated_ids"]   # List[int]
+        entropies = r["entropies"]        # List[float]
+        tok_strs  = r["token_strs"]       # List[str]
+
+        # 选本题中高熵最高的 top-N 步（而非全部，控制运行时间）
+        high_steps = sorted(
+            [(step, H) for step, H in enumerate(entropies) if H > H_thresh],
+            key=lambda x: x[1], reverse=True,
+        )[:max_probes_per_q]
+        high_steps_set = {step for step, _ in high_steps}
+
+        if not high_steps_set:
+            continue
+
+        logger.info(
+            f"  [错题 {rec_idx+1}/{len(incorrect_recs)}] q_idx={r['idx']}  "
+            f"高熵位置数={len(high_steps)}"
+        )
+
+        # ── 一次性 prefill Draft（处理整个 prompt）─────────────────────────
+        prompt_tensor = prompt_ids.to(device)           # [1, prompt_len]
+        out = model_draft(
+            input_ids=prompt_tensor,
+            past_key_values=None,
+            use_cache=True,
+        )
+        past_main  = out.past_key_values
+        # out.logits[0, -1, :] = Draft 对第 0 步（第一个生成 token）的预测
+
+        # ── 逐步推进，在高熵位置做探针 ──────────────────────────────────────
+        for step in range(len(gen_ids)):
+            # 此刻：past_main = KV(prompt + gen_ids[:step])
+            #        out.logits[0,-1,:] = Draft 对位置 step 的预测分布
+
+            if step in high_steps_set:
+                # Target 在此处高度不确定 → 让 Draft 从同一上下文贪婪续 k 步
+                # clone KV，不影响主推进 cache
+                past_probe = tuple(
+                    tuple(t.clone() for t in layer) for layer in past_main
+                )
+                next_logit = out.logits[0, -1, :].clone()  # [V_draft]
+
+                cont_strs = []
+                for ki in range(k):
+                    nid = int(next_logit.argmax().item())   # Draft 续词 token id
+                    cont_strs.append(tokenizer.decode([nid]))
+                    if ki < k - 1:                          # 最后一步无需再推进
+                        out_p = model_draft(
+                            input_ids=torch.tensor([[nid]], device=device),
+                            past_key_values=past_probe,
+                            use_cache=True,
+                        )
+                        past_probe = out_p.past_key_values
+                        next_logit = out_p.logits[0, -1, :]
+
+                events.append({
+                    "q_idx":                  r["idx"],
+                    "step":                   step,
+                    "H_target":               round(entropies[step], 4),
+                    "target_token":           tok_strs[step].strip(),
+                    # 高熵位置前 6 个 token，提供上下文
+                    "context_prefix":         "".join(tok_strs[max(0, step - 6):step]),
+                    "draft_continuation":     cont_strs,
+                    "draft_continuation_text": "".join(cont_strs),
+                })
+
+            # ── 推进主 KV Cache：喂入 Target 实际选择的 token ──────────────
+            out = model_draft(
+                input_ids=torch.tensor([[gen_ids[step]]], device=device),
+                past_key_values=past_main,
+                use_cache=True,
+            )
+            past_main = out.past_key_values
+            # 循环末尾：past_main = KV(prompt + gen_ids[:step+1])
+
+    logger.info(f"  Draft 延续探针完成：共 {len(events)} 条高熵事件")
+    return events
+
+
+def _report_draft_continuations(draft_events: list, out_dir: Path):
+    """报告并保存 Draft 延续词探针结果（Section 4）。"""
+    if not draft_events:
+        logger.info("\n【4. Draft 延续词探针】（跳过：无高熵事件或 --no_delta 模式）")
+        return
+
+    from collections import Counter
+
+    logger.info(f"\n【4. Draft 在 Target 高熵位置的延续词探针】")
+    logger.info(f"  共 {len(draft_events)} 个高熵探针事件（每事件 Draft 续 3 token）")
+
+    # ── 4a. 最常见的 Draft 延续词组 ────────────────────────────────────────
+    cont_counter = Counter(
+        e["draft_continuation_text"].strip() for e in draft_events
+    )
+    logger.info(f"\n  Top-20 Draft 最常见延续（Target 困惑时 Draft 最想说什么）：")
+    logger.info(f"  {'Draft 延续（3 tokens）':<40} {'频次':>5}")
+    logger.info("  " + "-" * 48)
+    for text, cnt in cont_counter.most_common(20):
+        logger.info(f"  {repr(text):<40} {cnt:>5}")
+
+    # ── 4b. Top-20 高熵事件详情（按 H_target 降序）──────────────────────
+    sorted_events = sorted(draft_events, key=lambda x: x["H_target"], reverse=True)
+    logger.info(
+        f"\n  Top-20 高熵位置详情（Target 最困惑时，Draft 想输出的内容）：\n"
+        f"  格式：[H=] 上文 | Target实际输出 | Draft续: [3 tokens]"
+    )
+    logger.info("  " + "-" * 85)
+    for e in sorted_events[:20]:
+        logger.info(
+            f"  [H={e['H_target']:.2f}] "
+            f"...{e['context_prefix']!r:.<30} "
+            f"Target:『{e['target_token']:.<12}』 "
+            f"Draft续:{e['draft_continuation']}"
+        )
+
+    # ── 4c. 保存 JSON ───────────────────────────────────────────────────
+    report = {
+        "total_events":       len(draft_events),
+        "k_continuation":     len(draft_events[0]["draft_continuation"]) if draft_events else 0,
+        "note": (
+            "在 Target 熵 > μ+σ（错题）的位置，让 Draft 从同一上下文贪婪续 k token。"
+            "draft_continuation 中出现的领域词，说明 Draft 在 Target 最困惑时拥有该位置的领域知识。"
+        ),
+        "top_continuations": [
+            {"text": t, "count": c} for t, c in cont_counter.most_common(50)
+        ],
+        "top_events_by_entropy": sorted_events[:50],
+    }
+    path = out_dir / "draft_continuation_probe.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    logger.info(f"\n  Draft 延续探针报告 → {path}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 分析 & 报告
 # ──────────────────────────────────────────────────────────────────────────────
 
-def analyze_and_report(records: list, out_dir: Path):
+def analyze_and_report(records: list, out_dir: Path, draft_events: list = None):
     correct_recs   = [r for r in records if r["is_correct"]]
     incorrect_recs = [r for r in records if not r["is_correct"]]
     H_max_ref      = math.log(152064)                    # Qwen2.5 词表大小
@@ -442,6 +608,9 @@ def analyze_and_report(records: list, out_dir: Path):
         json.dump(summary, f, indent=2)
     logger.info(f"\n汇总报告 → {out_dir / 'summary.json'}")
 
+    # ── 4. Draft 延续词探针报告 ──────────────────────────────────────────────
+    _report_draft_continuations(draft_events or [], out_dir)
+
     # ── 5. 可视化 ─────────────────────────────────────────────────────────
     _plot(
         corr_H, incorr_H, corr_Hn, incorr_Hn,
@@ -565,12 +734,17 @@ def main(args):
     items = load_surgery_data(args.limit, subject=args.subject)
 
     # ── 主循环：逐题生成并记录熵 ──────────────────────────────────────────
-    records = []
+    records         = []
+    prompt_ids_list = []    # 与 records 一一对应，保存 prompt input_ids（CPU），供 Draft 探针用
+
     for idx, item in enumerate(items):
         correct_label = get_correct_label(item)
         # format_prompt 内部已调用 apply_chat_template，直接返回完整 prompt 字符串
         text      = format_prompt(item, tokenizer)
         input_ids = tokenizer(text, return_tensors="pt").input_ids.to(device)
+
+        # 保存 prompt_ids（CPU）供后续 Draft 探针重建上下文
+        prompt_ids_list.append(input_ids.cpu())
 
         gen = generate_with_entropy(
             model_target, model_draft, model_base,
@@ -586,17 +760,18 @@ def main(args):
         mean_Hn = float(np.mean(gen["norm_entropies"]))  if gen["norm_entropies"] else 0.0
 
         record = {
-            "idx":             idx,
-            "question":        item["question"][:120],    # 截断节省空间
-            "correct_label":   correct_label,
-            "pred_label":      pred_label,
-            "is_correct":      is_correct,
-            "gen_text":        gen_text,
-            "token_strs":      gen["token_strs"],
-            "entropies":       [round(h, 5) for h in gen["entropies"]],
-            "norm_entropies":  [round(h, 5) for h in gen["norm_entropies"]],
-            "delta_ps":        [round(d, 5) for d in gen["delta_ps"]],
-            "mean_entropy":    round(mean_H,  5),
+            "idx":               idx,
+            "question":          item["question"][:120],    # 截断节省空间
+            "correct_label":     correct_label,
+            "pred_label":        pred_label,
+            "is_correct":        is_correct,
+            "gen_text":          gen_text,
+            "token_strs":        gen["token_strs"],
+            "generated_ids":     gen["generated_ids"],      # 原始 token id，供 Draft 探针用
+            "entropies":         [round(h, 5) for h in gen["entropies"]],
+            "norm_entropies":    [round(h, 5) for h in gen["norm_entropies"]],
+            "delta_ps":          [round(d, 5) for d in gen["delta_ps"]],
+            "mean_entropy":      round(mean_H,  5),
             "mean_norm_entropy": round(mean_Hn, 5),
         }
         records.append(record)
@@ -611,12 +786,40 @@ def main(args):
 
     # ── 保存原始记录 ──────────────────────────────────────────────────────
     raw_path = out_dir / "entropy_records.json"
+    # generated_ids 仅供本次会话内 Draft 探针使用，不写入 JSON（节省空间）
+    records_for_json = [{k: v for k, v in r.items() if k != "generated_ids"} for r in records]
     with open(raw_path, "w", encoding="utf-8") as f:
-        json.dump(records, f, ensure_ascii=False, indent=2)
+        json.dump(records_for_json, f, ensure_ascii=False, indent=2)
     logger.info(f"\n原始记录 → {raw_path}")
 
+    # ── Draft 延续词探针（Section 4）────────────────────────────────────────
+    # 仅在加载了 Draft 模型时运行（full ΔP 模式）
+    draft_events = []
+    if model_draft is not None:
+        incorrect_recs  = [r for r in records if not r["is_correct"]]
+        incorr_pids     = [prompt_ids_list[r["idx"]] for r in incorrect_recs]
+
+        # 用错题整体熵的 μ+σ 作为高熵阈值（与 Section 3 保持一致）
+        all_incorr_H = [H for r in incorrect_recs for H in r["entropies"]]
+        H_thresh_probe = float(np.mean(all_incorr_H) + np.std(all_incorr_H)) if all_incorr_H else 1.0
+
+        logger.info(
+            f"\n开始 Draft 延续词探针（错题 {len(incorrect_recs)} 道，"
+            f"高熵阈值={H_thresh_probe:.4f} nats，每题最多探 {args.draft_probe_top_k} 个位置）..."
+        )
+        draft_events = collect_draft_continuations(
+            model_draft=model_draft,
+            tokenizer=tokenizer,
+            incorrect_recs=incorrect_recs,
+            prompt_ids_list=incorr_pids,
+            H_thresh=H_thresh_probe,
+            device=device,
+            k=3,
+            max_probes_per_q=args.draft_probe_top_k,
+        )
+
     # ── 分析 & 报告 ────────────────────────────────────────────────────────
-    analyze_and_report(records, out_dir)
+    analyze_and_report(records, out_dir, draft_events=draft_events)
 
 
 if __name__ == "__main__":
@@ -631,5 +834,7 @@ if __name__ == "__main__":
                         help="MedMCQA 科目过滤（如 Surgery/Pharmacology/Anatomy，空字符串=全量）")
     parser.add_argument("--out_dir",  type=str,  default="results/entropy_analysis",
                         help="输出目录")
+    parser.add_argument("--draft_probe_top_k", type=int, default=10,
+                        help="Draft 延续探针：每道错题最多探针的高熵位置数（取熵最高的 top-k）")
     args = parser.parse_args()
     main(args)
