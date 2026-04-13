@@ -52,56 +52,42 @@ logger = logging.getLogger(__name__)
 TARGET_PATH = "/data/ocean/decoding/model/Qwen/Qwen2.5-32B-Instruct"
 DRAFT_PATH  = "/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct-Surgery/checkpoint-1676"
 BASE_PATH   = "/data/ocean/decoding/model/Qwen/Qwen2.5-3B-Instruct"
-MEDMCQA_CACHE = "/data/ocean/decoding/data/medmcqa_cache/"
-
 CHOICE_LABELS = ["A", "B", "C", "D"]
 
-SYSTEM_PROMPT = (
-    "You are a helpful medical assistant. "
-    "Answer the following multiple choice question. "
-    "At the end, clearly state your final answer in the format: Final answer: X"
-)
-
 # ──────────────────────────────────────────────────────────────────────────────
-# 数据工具
+# 数据工具：直接复用 data_loader.load_medmcqa（使用正确的缓存路径）
 # ──────────────────────────────────────────────────────────────────────────────
 
 def load_surgery_data(limit: int):
-    from datasets import load_dataset
-    logger.info("Loading MedMCQA validation set...")
-    ds = load_dataset(
-        "openlifescienceai/medmcqa",
-        split="validation",
-        cache_dir=MEDMCQA_CACHE,
+    """
+    复用 data_loader.load_medmcqa 加载 Surgery 子集。
+    返回的每条记录格式：
+      item["question"]   str
+      item["options"]    dict  {"A": ..., "B": ..., "C": ..., "D": ...}
+      item["answer_idx"] str   "A"/"B"/"C"/"D"
+    """
+    from data_loader import load_medmcqa
+    logger.info("Loading MedMCQA Surgery validation set via data_loader...")
+    ds = load_medmcqa(split="validation", limit=limit, subject="Surgery")
+    logger.info(f"Loaded {len(ds)} Surgery questions")
+    return list(ds)
+
+
+def format_prompt(item: dict, tokenizer) -> str:
+    """
+    复用 data_loader.format_prompt 构造与 run_benchmark.py 完全一致的 prompt。
+    """
+    from data_loader import format_prompt as dl_format_prompt
+    return dl_format_prompt(
+        tokenizer,
+        question=item["question"],
+        options=item["options"],
+        dataset_name="medmcqa",
     )
-    items = [
-        item for item in ds
-        if item.get("subject_name", "").lower() == "surgery"
-    ]
-    logger.info(f"Found {len(items)} Surgery questions, using first {min(limit, len(items))}")
-    return items[:limit]
-
-
-def format_prompt(item: dict) -> str:
-    """构造与 run_benchmark.py 一致的 MCQ prompt。"""
-    q = item["question"]
-    opts = {
-        "A": item.get("opa", ""),
-        "B": item.get("opb", ""),
-        "C": item.get("opc", ""),
-        "D": item.get("opd", ""),
-    }
-    msg = f"Question: {q}\n"
-    for label, text in opts.items():
-        msg += f"{label}. {text}\n"
-    return msg
 
 
 def get_correct_label(item: dict) -> str:
-    cop = item.get("cop", 0)
-    if isinstance(cop, int):
-        return CHOICE_LABELS[cop]
-    return str(cop).strip().upper()
+    return item.get("answer_idx", "A")
 
 
 def extract_predicted_label(text: str):
@@ -521,15 +507,8 @@ def main(args):
     records = []
     for idx, item in enumerate(items):
         correct_label = get_correct_label(item)
-        user_msg      = format_prompt(item)
-
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": user_msg},
-        ]
-        text      = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        # format_prompt 内部已调用 apply_chat_template，直接返回完整 prompt 字符串
+        text      = format_prompt(item, tokenizer)
         input_ids = tokenizer(text, return_tensors="pt").input_ids.to(device)
 
         gen = generate_with_entropy(
