@@ -1,5 +1,5 @@
 """
-验收策略层 — 9 种策略的解耦实现 + 工厂函数
+验收策略层 — 10 种策略的解耦实现 + 工厂函数
 
 对应实验计划 Section 4 Step 3 的 Strategy Routing：
   StandardSD            策略 A：标准投机解码，概率比值验收
@@ -11,6 +11,7 @@
   SoftGuidanceC4        策略 C4：Draft 领域自信度动态门控（Confidence-Gated α）
   SoftGuidanceC5        策略 C5：Target 认知不确定性驱动路由（Entropy-Aware α）
   SoftGuidanceC6        策略 C6：双信号联合门控（C4 × C5，Draft 自信 AND Target 懵逼）
+  SoftGuidanceC7        策略 C7：C3 框架 + C6 双信号动态 α（概率域加法 + 联合门控，无 P_d 隐式乘积）
 
 设计原则：
   - 所有策略通过 VerifyContext 统一接受输入，通过 AcceptResult 统一输出
@@ -950,6 +951,141 @@ class SoftGuidanceC6(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C7：C3 框架 + C6 双信号动态 α（概率域加法 + 联合门控）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC7(AcceptanceStrategy):
+    """策略 C7：C3 框架 + C6 双信号动态 α。
+
+    动机：
+        C6 在 C1 框架 (P_t/P_d + α_t·ΔP) 下等价于分子 P_t + α_t·ΔP·P_d，
+        有效 bonus 是 α_t·ΔP·P_d，即在 C6 的双信号门控基础上又隐式地乘了 P_d(x)。
+        由于 C4/C6 的 S_t 已经包含了对 Draft 置信度的全局度量，P_d(x) 再次参与
+        构成了对 Draft 置信度的"双重加权"，不一定是最优设计。
+
+        C7 将 C6 的双信号动态 α 迁移到 C3 框架（概率域直接加法），
+        消除隐式 P_d 乘积，让 bonus 保持量纲一致的纯概率补贴：
+
+            Step 1（局部校准）：P'_target(x) = P_target(x) + α_t · ΔP
+            Step 2（标准验收）：P'_accept = min(1, P'_target(x) / P_draft(x))
+
+        其中双信号动态 α_t = λ · I(S_t>τ) · S_t · H_t/H_max（与 C6 完全相同）。
+
+    C7 vs C6 的唯一区别：
+        C6: bonus = α_t · ΔP · P_d(x)   ← C1 框架，隐式 P_d 乘积
+        C7: bonus = α_t · ΔP             ← C3 框架，纯概率域加法，无 P_d 乘积
+
+    这使得 C7 是**消融 P_d 隐式乘积影响**的受控实验对照组。
+
+    贪婪模式（t_sample=0）的确定性判据（继承 C3）：
+        接受当且仅当 p_accept_prime >= 1.0，即 P'_target(x) >= P_draft(x)。
+        拒绝时回退到 argmax(logit_target)。
+
+    超参数：
+        lambda  (--alpha): 联合信号最大注入强度 λ
+        c4_tau  (--c4_tau): C4 稀疏激活阈值 τ（默认 0.1）
+    """
+
+    def __init__(
+        self,
+        lam:           float,
+        c4_tau:        float,
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._lam    = lam
+        self._tau    = c4_tau
+        self._params = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        # ── C4 信号：S_t = max(P_draft) - max(P_base)（全局 Draft 自信门）──
+        p_draft_full = F.softmax(ctx.logit_draft / t, dim=-1)  # [1, V_draft]
+        p_base_full  = F.softmax(ctx.logit_base  / t, dim=-1)  # [1, V_base]
+        s_t = float(p_draft_full.max().item()) - float(p_base_full.max().item())
+        c4_factor = s_t if s_t > self._tau else 0.0
+
+        # ── C5 信号：H_t / H_max（Target 输出熵归一化）──────────────────────
+        p_target_full = F.softmax(ctx.logit_target / t, dim=-1)  # [1, V_target]
+        h_t = float(
+            -torch.sum(p_target_full * torch.log(p_target_full + 1e-12)).item()
+        )
+        h_max = math.log(p_target_full.shape[-1])
+        c5_factor = h_t / h_max  # ∈ [0, 1]
+
+        # ── 联合动态 α（与 C6 相同）─────────────────────────────────────────
+        # α_t = λ · I(S_t > τ) · S_t · H_t/H_max
+        alpha_t = self._lam * c4_factor * c5_factor
+
+        # ── 计算 ΔP 与各模型对 draft token 的概率 ───────────────────────────
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+        p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c7_draft_prob_zero",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+        # ── C3 框架：概率域直接加法，消除 P_d 隐式乘积 ──────────────────────
+        # Step 1: P'_target(x) = P_target(x) + α_t · ΔP （纯概率域补贴）
+        # Step 2: P'_accept = min(1, P'_target / P_draft)
+        p_target_prime = p_target + alpha_t * delta_p
+        p_accept_prime = min(1.0, p_target_prime / p_draft)
+
+        # 贪婪模式（t_sample=0）：确定性接受（继承 C3 的判据）
+        if ctx.t_sample == 0.0:
+            if p_accept_prime >= 1.0:
+                return AcceptResult(
+                    accepted=True,
+                    chosen_token_id=x,
+                    reason="c7_greedy_dual_accepted",
+                    delta_p=delta_p,
+                    p_draft=p_draft,
+                    p_target=p_target_prime,
+                )
+            else:
+                chosen = _argmax_token(ctx.logit_target)
+                return AcceptResult(
+                    accepted=False,
+                    chosen_token_id=chosen,
+                    reason="c7_greedy_dual_rejected",
+                    delta_p=delta_p,
+                    p_draft=p_draft,
+                    p_target=p_target_prime,
+                )
+
+        # 随机采样模式
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True,
+                chosen_token_id=x,
+                reason="c7_dual_accepted",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target_prime,
+            )
+        else:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c7_dual_rejected",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target_prime,
+            )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -1010,6 +1146,13 @@ def create_strategy(
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C6:
         return SoftGuidanceC6(
+            lam=alpha,
+            c4_tau=float(kwargs.get("c4_tau", 0.1)),
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C7:
+        return SoftGuidanceC7(
             lam=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.1)),
             signal_params=signal_params,

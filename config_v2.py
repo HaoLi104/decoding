@@ -23,6 +23,7 @@ class StrategyType(Enum):
     SOFT_GUIDANCE_C4  = "soft_guidance_c4"   # 策略 C4：Draft 领域自信度动态门控（Confidence-Gated α）
     SOFT_GUIDANCE_C5  = "soft_guidance_c5"   # 策略 C5：Target 认知不确定性驱动路由（Entropy-Aware α）
     SOFT_GUIDANCE_C6  = "soft_guidance_c6"   # 策略 C6：双信号联合门控（C4 × C5，Draft 自信 AND Target 懵逼）
+    SOFT_GUIDANCE_C7  = "soft_guidance_c7"   # 策略 C7：C3 框架 + C6 双信号动态 α（概率域直接补贴 + 联合门控）
 
 
 class ExecutionArch(Enum):
