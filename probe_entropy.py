@@ -30,6 +30,7 @@ probe_entropy.py — Target 模型 Shannon 熵分布分析 + Draft 延续词探�
 """
 
 import argparse
+import copy
 import json
 import logging
 import math
@@ -291,9 +292,9 @@ def collect_draft_continuations(
             if step in high_steps_set:
                 # Target 在此处高度不确定 → 让 Draft 从同一上下文贪婪续 k 步
                 # clone KV，不影响主推进 cache
-                past_probe = tuple(
-                    tuple(t.clone() for t in layer) for layer in past_main
-                )
+                # 用 deepcopy 而非手动 tuple clone，确保兼容新版 transformers 的
+                # DynamicCache 对象（该对象有 .get_seq_length() 方法，降级为 tuple 会报错）
+                past_probe = copy.deepcopy(past_main)
                 next_logit = out.logits[0, -1, :].clone()  # [V_draft]
 
                 cont_strs = []
