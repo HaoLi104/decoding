@@ -24,6 +24,7 @@ class StrategyType(Enum):
     SOFT_GUIDANCE_C5  = "soft_guidance_c5"   # 策略 C5：Target 认知不确定性驱动路由（Entropy-Aware α）
     SOFT_GUIDANCE_C6  = "soft_guidance_c6"   # 策略 C6：双信号联合门控（C4 × C5，Draft 自信 AND Target 懵逼）
     SOFT_GUIDANCE_C7  = "soft_guidance_c7"   # 策略 C7：C3 框架 + C6 双信号动态 α（概率域直接补贴 + 联合门控）
+    SOFT_GUIDANCE_C8  = "soft_guidance_c8"   # 策略 C8：C6 变体，门控信号 S_t 改为 token 级 ΔP(x)（消融全局 vs token 级门控）
 
 
 class ExecutionArch(Enum):

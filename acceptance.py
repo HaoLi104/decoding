@@ -1086,6 +1086,133 @@ class SoftGuidanceC7(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C8：C6 变体——门控信号改为 token 级 ΔP(x)（消融全局 vs token 级）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC8(AcceptanceStrategy):
+    """策略 C8：token 级双信号门控（Token-Level Confidence Gate）。
+
+    动机与 C6 的唯一区别：
+        C6 的门控信号 S_t = max(P_draft) - max(P_base) 是一个「步级（step-level）」
+        全局信号——两个 max 可能来自不同的 token，衡量的是 Draft 整体上是否比 Base 更
+        自信，与当前被验收的 token x 没有直接绑定。
+
+        这会导致「误触发」：Draft 高置信在 token A 上，但我们在验收 token B，S_t 依然
+        可能很高，从而对 B 施加了不该有的增强。
+
+    C8 的修正：
+        将门控信号改为「token 级（token-level）」：
+            S_t(x) = P_draft(x) - P_base(x) = ΔP(x)
+
+        即与 ΔP 使用完全相同的 token x，门控和 bonus 指向同一个问题：
+            「Draft 对这个具体 token x，比 Base 更偏爱吗？」
+
+    动态 α（token 级门控 + C5 熵权）：
+        α_t = λ · I(ΔP(x) > τ) · ΔP(x) · (H_t / H_max)
+
+    等价 bonus（在 C1 框架展开后）：
+        bonus_C8 = α_t · ΔP(x) · P_d(x)
+                 = λ · I(ΔP(x)>τ) · (ΔP(x))² · (H_t/H_max) · P_d(x)
+
+    与 C6 的比较：
+        C6: bonus = λ · I(S_t>τ) · S_t · ΔP(x) · (H_t/H_max) · P_d(x)   [S_t 和 ΔP 不同量]
+        C8: bonus = λ · I(ΔP(x)>τ) · (ΔP(x))² · (H_t/H_max) · P_d(x)  [ΔP 出现两次，自放大]
+
+    消融价值：
+        - 若 C8 > C6：说明 token 级门控更精准，全局 S_t 引入了误触发噪音
+        - 若 C8 < C6：说明全局 step-level S_t 携带了额外有用信息（Draft 全局自信≠ΔP 高）
+
+    完整验收公式（C1 比值域加法框架）：
+        P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP(x))
+
+    超参数：
+        lambda  (--alpha) : 最大注入强度 λ
+        c4_tau  (--c4_tau): ΔP(x) 门控阈值 τ（默认 0.05，比 C6 的 0.1 略低，因为 ΔP 值域更小）
+    """
+
+    def __init__(
+        self,
+        lam:           float,
+        c4_tau:        float,
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._lam    = lam
+        self._tau    = c4_tau
+        self._params = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        # ── 计算 ΔP(x)：token 级领域信号（同时用于门控和 bonus）───────────
+        # ΔP(x) = P_draft(x) - P_base(x)，在提案 token x 上计算
+        # shape: logit_draft [1, V_draft], logit_base [1, V_base]
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+
+        # ── C8 token 级门控：I(ΔP(x) > τ) · ΔP(x) ───────────────────────
+        # 仅当 Draft 对 token x 的优势超过阈值时才激活
+        # （与 C6 的区别：C6 用 max(P_d)-max(P_b) 全局信号，C8 用 ΔP(x) token 信号）
+        c8_factor = delta_p if delta_p > self._tau else 0.0   # ∈ [0, ~0.5]
+
+        # ── C5 信号：H_t / H_max（Target 输出熵归一化） ───────────────────
+        p_target_full = F.softmax(ctx.logit_target / t, dim=-1)  # [1, V_target]
+        h_t = float(
+            -torch.sum(p_target_full * torch.log(p_target_full + 1e-12)).item()
+        )
+        h_max     = math.log(p_target_full.shape[-1])   # log(V) ≈ 11.93
+        c5_factor = h_t / h_max                          # ∈ [0, 1]
+
+        # ── 联合动态 α（token 级双信号）────────────────────────────────────
+        # α_t = λ · I(ΔP(x) > τ) · ΔP(x) · (H_t / H_max)
+        # bonus 展开后 ∝ (ΔP(x))²，自放大效应比 C6 更锐利
+        alpha_t = self._lam * c8_factor * c5_factor       # scalar
+
+        # ── 计算 P_target(x) ──────────────────────────────────────────────
+        p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c8_draft_prob_zero",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+        # ── C1 框架：比值域加法 + token 级联合动态 α ─────────────────────
+        # P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP(x))
+        # shape: scalar
+        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+
+        token_gated = c8_factor > 0.0
+        reason_tag  = "token_gated" if token_gated else "passthrough"
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True,
+                chosen_token_id=x,
+                reason=f"c8_{reason_tag}_accepted",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+        else:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason=f"c8_{reason_tag}_rejected",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -1155,6 +1282,14 @@ def create_strategy(
         return SoftGuidanceC7(
             lam=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.1)),
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C8:
+        return SoftGuidanceC8(
+            lam=alpha,
+            # C8 的 τ 作用在 ΔP(x) 上（值域约 [-0.5, 0.5]），默认取 0.05
+            c4_tau=float(kwargs.get("c4_tau", 0.05)),
             signal_params=signal_params,
         )
 
