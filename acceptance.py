@@ -1494,6 +1494,165 @@ class SoftGuidanceC10(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C11：Logit 域 PoE + C9 二值 token 级门控 + 熵权（动态 α）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC11(AcceptanceStrategy):
+    """策略 C11：Logit 域 PoE + 动态门控（C10 × C9 思想融合）。
+
+    C10 在 logit 域做固定强度的全局 PoE 注入，等价于全程用同一 α 更新所有 token。
+    C11 将 C9 的"二值 token 级门控 + Target 熵权"移植到 logit 域，使注入更精准：
+
+        α_t = λ · I(Δlogit(x) > τ) · (H_t / H_max)
+
+    其中门控信号从 C9 的 ΔP(x) 换为 **Δlogit(x) = logit_draft(x) - logit_base(x)**，
+    即对数似然比。这使整个方法完全在 logit 域内自洽：
+
+        信号 Δlogit ——用于门控判断"是否是领域词"（Δlogit > τ → log-ratio > τ → P_d/P_b > e^τ）
+        信号 Δlogit ——用于注入幅度（logit_steered = logit_T + α_t · Δlogit）
+        信号 H_t    ——Target 熵，决定"Target 有多困惑"
+
+    等价 PoE 形式（Softmax 后）：
+
+        P_steered(x) ∝ P_target(x) · (P_draft(x)/P_base(x))^{α_t}
+
+    与 C10 的唯一区别：α 变为动态（token 级二值门控 + 熵权），未满足条件时 α_t=0，
+    退化为纯 Target 贪婪——天然保护通用能力。
+
+    与 C9 的唯一区别：注入域从概率域（ΔP 加法）变为 logit 域（Δlogit 加法）。
+
+    消融价值：
+        C11 vs C10：验证动态门控是否在 logit 域同样有益（减少误触发）
+        C11 vs C9 ：验证 logit 域信号是否比概率域信号更精准（理论更优雅）
+
+    完整流程：
+        1. 计算 Δlogit(x) = logit_draft(x) - logit_base(x)
+        2. 计算 H_t（Target 输出熵），得到 α_t = λ · I(Δlogit(x) > τ) · H_t/H_max
+        3. logit_steered = logit_target + α_t · Δlogit  （全词表向量操作，仅当 α_t > 0）
+        4. P'_accept = min(1, P_steered(x) / P_draft(x))
+
+    超参数：
+        lambda  (--alpha) : 最大注入强度 λ
+        c4_tau  (--c4_tau): Δlogit(x) 门控阈值 τ（默认 0.1，对应 P_d/P_b > e^0.1 ≈ 1.1×）
+    """
+
+    def __init__(
+        self,
+        lam:           float,
+        c4_tau:        float,
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._lam    = lam
+        self._tau    = c4_tau
+        self._params = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        # ── 词表对齐 ──────────────────────────────────────────────────────
+        v_min = min(
+            ctx.logit_target.shape[-1],
+            ctx.logit_draft.shape[-1],
+            ctx.logit_base.shape[-1],
+        )
+        logit_t_raw = ctx.logit_target[..., :v_min]   # [1, v_min]（原始，无温度）
+        logit_d_raw = ctx.logit_draft [..  , :v_min]  # [1, v_min]
+        logit_b_raw = ctx.logit_base  [..., :v_min]   # [1, v_min]
+
+        if x >= v_min:
+            chosen = _argmax_token(logit_t_raw) if ctx.t_sample == 0.0 \
+                     else _sample_token(logit_t_raw, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c11_vocab_boundary",
+                delta_p=0.0, p_draft=0.0, p_target=0.0,
+            )
+
+        # ── Δlogit(x)：logit 域 token 级领域信号 ──────────────────────────
+        # Δlogit(x) = logit_draft(x) - logit_base(x) = log(P_draft(x)/P_base(x))
+        # 使用 t_fixed 温度缩放后的 logit（与其他策略保持一致）
+        delta_logit_x = float((logit_d_raw[0, x] - logit_b_raw[0, x]).item()) / t   # scalar
+
+        # ── 二值 token 级门控：I(Δlogit(x) > τ) ─────────────────────────
+        # τ 作用于对数似然比域：Δlogit > τ ↔ P_d/P_b > e^τ（Draft 更偏爱 x）
+        gate = 1.0 if delta_logit_x > self._tau else 0.0   # binary {0, 1}
+
+        # ── C5 信号：H_t / H_max（Target 输出熵归一化） ───────────────────
+        p_target_full = F.softmax(logit_t_raw / t, dim=-1)  # [1, v_min]
+        h_t = float(
+            -torch.sum(p_target_full * torch.log(p_target_full + 1e-12)).item()
+        )
+        h_max     = math.log(p_target_full.shape[-1])        # log(V)
+        c5_factor = h_t / h_max                              # ∈ [0, 1]
+
+        # ── 动态 α_t = λ · I(Δlogit > τ) · (H_t / H_max) ────────────────
+        alpha_t = self._lam * gate * c5_factor               # scalar
+
+        # ── Logit 域 PoE 注入（仅当 α_t > 0 时执行） ─────────────────────
+        # logit_steered = logit_target + α_t · Δlogit  [1, v_min]
+        if alpha_t > 0.0:
+            delta_logit_full  = (logit_d_raw - logit_b_raw) / t   # [1, v_min]
+            logit_steered_raw = logit_t_raw + alpha_t * (logit_d_raw - logit_b_raw)  # [1, v_min]（无温度缩放，供采样用）
+            logit_steered_t   = logit_t_raw / t + alpha_t * delta_logit_full         # [1, v_min]（有温度缩放，供 P_steered 计算）
+        else:
+            logit_steered_raw = logit_t_raw
+            logit_steered_t   = logit_t_raw / t
+
+        # ── 提取 P_steered(x) 和 P_draft(x) ─────────────────────────────
+        p_steered_full = F.softmax(logit_steered_t, dim=-1)         # [1, v_min]
+        p_steered_x    = float(p_steered_full[0, x].item())         # scalar
+        p_draft_x      = float(F.softmax(logit_d_raw / t, dim=-1)[0, x].item())  # scalar
+
+        # ΔP（遥测用）
+        p_base_x = float(F.softmax(logit_b_raw / t, dim=-1)[0, x].item())
+        delta_p  = p_draft_x - p_base_x
+
+        if p_draft_x < 1e-12:
+            chosen = _argmax_token(logit_steered_raw) if ctx.t_sample == 0.0 \
+                     else _sample_token(logit_steered_raw, ctx.t_sample)
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason="c11_draft_prob_zero",
+                delta_p=delta_p, p_draft=p_draft_x, p_target=p_steered_x,
+            )
+
+        # ── 验收：P'_accept = min(1, P_steered(x) / P_draft(x)) ──────────
+        p_accept_prime = min(1.0, p_steered_x / p_draft_x)
+        reason_tag = "gated" if gate > 0.0 else "passthrough"
+
+        if ctx.t_sample == 0.0:
+            if p_accept_prime >= 1.0:
+                return AcceptResult(
+                    accepted=True, chosen_token_id=x,
+                    reason=f"c11_greedy_{reason_tag}_accepted",
+                    delta_p=delta_p, p_draft=p_draft_x, p_target=p_steered_x,
+                )
+            else:
+                chosen = _argmax_token(logit_steered_raw)
+                return AcceptResult(
+                    accepted=False, chosen_token_id=chosen,
+                    reason=f"c11_greedy_{reason_tag}_rejected",
+                    delta_p=delta_p, p_draft=p_draft_x, p_target=p_steered_x,
+                )
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True, chosen_token_id=x,
+                reason=f"c11_{reason_tag}_accepted",
+                delta_p=delta_p, p_draft=p_draft_x, p_target=p_steered_x,
+            )
+        else:
+            chosen = _sample_token(logit_steered_raw, ctx.t_sample)
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason=f"c11_{reason_tag}_rejected",
+                delta_p=delta_p, p_draft=p_draft_x, p_target=p_steered_x,
+            )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -1583,6 +1742,14 @@ def create_strategy(
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C10:
         return SoftGuidanceC10(
             alpha=alpha,
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C11:
+        return SoftGuidanceC11(
+            lam=alpha,
+            # τ 作用于 Δlogit 域（默认 0.1 ≈ P_d/P_b > 1.1×）
+            c4_tau=float(kwargs.get("c4_tau", 0.1)),
             signal_params=signal_params,
         )
 
