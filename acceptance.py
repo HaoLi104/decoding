@@ -1335,6 +1335,165 @@ class SoftGuidanceC9(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C10：Logit 域 Product of Experts（最具理论基础的领域注入）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC10(AcceptanceStrategy):
+    """策略 C10：Logit 域 Product of Experts（PoE）注入。
+
+    与 C1–C9 在概率域或比值域操作不同，C10 直接在 logit（对数概率）域做领域注入：
+
+        logit_steered = logit_target + α · (logit_draft - logit_base)
+
+    等价于（Softmax 后）：
+
+        P_steered(x) ∝ P_target(x) · (P_draft(x) / P_base(x))^α
+
+    这正是 Product of Experts（PoE / Bayesian 乘积更新）公式：
+        - P_target       → 先验（通用大模型的通用知识）
+        - P_draft/P_base → 领域似然比（专家相对常识基线的超额置信度）
+        - α              → 似然更新强度
+
+    物理可解释性：
+        Δlogit(x) = logit_draft(x) - logit_base(x) = log(P_draft(x) / P_base(x))
+        是领域似然比的对数——比概率差 ΔP(x) 更具理论基础（Bayes 更新的充分统计量）。
+        注入后 P_steered 始终是合法的概率分布（Softmax 保证归一化，无负值问题）。
+
+    与 C3 的区别：
+        C3  在概率域做加法：P_steered = P_target + α · ΔP（相加后可能不归一化）
+        C10 在 logit 域做加法：logit_steered = logit_target + α · Δlogit（相加后归一化天然满足）
+
+    验收公式（C3 框架，直接用 P_steered 替换 P_target）：
+        P'_accept = min(1, P_steered(x) / P_draft(x))
+
+    拒绝时：
+        - 贪婪模式（t_sample=0）：从 logit_steered 取 argmax
+        - 随机模式：从 softmax(logit_steered / t_sample) 采样
+
+    超参数：
+        alpha (--alpha): 领域注入强度 α（建议搜索 0.1–2.0，量纲与 C1 类似）
+
+    注意事项：
+        - 需要三模型词表相同（Qwen2.5 系列均为 152064，满足）
+        - 每步需做一次全词表向量加法（O(V)，V=152064），略贵于 C1 的标量操作
+    """
+
+    def __init__(self, alpha: float, signal_params: DomainSignalParams) -> None:
+        self._alpha  = alpha
+        self._params = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        # ── 取三模型 logit（在 t_fixed 温度缩放下） ───────────────────────
+        # shape: [1, V]，所有 Qwen2.5 模型 V=152064
+        logit_t = ctx.logit_target / t   # [1, V_target]
+        logit_d = ctx.logit_draft  / t   # [1, V_draft]
+        logit_b = ctx.logit_base   / t   # [1, V_base]
+
+        # 词表大小一致性保证（截断到共同最小维度）
+        v_min = min(logit_t.shape[-1], logit_d.shape[-1], logit_b.shape[-1])
+        if x >= v_min:
+            # 极端边界情况：token 超出最小词表，直接 passthrough
+            chosen = _argmax_token(ctx.logit_target) if ctx.t_sample == 0.0 \
+                     else _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c10_vocab_boundary",
+                delta_p=0.0,
+                p_draft=0.0,
+                p_target=0.0,
+            )
+        logit_t = logit_t[..., :v_min]   # [1, v_min]
+        logit_d = logit_d[..., :v_min]   # [1, v_min]
+        logit_b = logit_b[..., :v_min]   # [1, v_min]
+
+        # ── Logit 域 PoE 注入（全词表向量操作）──────────────────────────
+        # Δlogit = logit_draft - logit_base = log(P_draft / P_base)  [1, v_min]
+        # logit_steered = logit_target + α · Δlogit                  [1, v_min]
+        # 等价于：P_steered(x) ∝ P_target(x) · (P_draft(x)/P_base(x))^α
+        delta_logit   = logit_d - logit_b                         # [1, v_min]
+        logit_steered = logit_t + self._alpha * delta_logit       # [1, v_min]
+
+        # ── 从 steered logit 提取 P_steered(x)（acceptance 用）────────────
+        p_steered_full = F.softmax(logit_steered, dim=-1)         # [1, v_min]
+        p_steered_x    = float(p_steered_full[0, x].item())       # scalar
+
+        # ── P_draft(x)（acceptance 分母） ────────────────────────────────
+        p_draft_x = float(F.softmax(ctx.logit_draft / t, dim=-1)[0, x].item())
+
+        # ── ΔP（仅遥测，不参与 C10 逻辑） ────────────────────────────────
+        p_base_x  = float(F.softmax(ctx.logit_base  / t, dim=-1)[0, x].item())
+        delta_p   = p_draft_x - p_base_x
+
+        if p_draft_x < 1e-12:
+            chosen = _argmax_token(ctx.logit_target[..., :v_min]) if ctx.t_sample == 0.0 \
+                     else _sample_token(ctx.logit_target[..., :v_min], ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c10_draft_prob_zero",
+                delta_p=delta_p,
+                p_draft=p_draft_x,
+                p_target=p_steered_x,
+            )
+
+        # ── 验收：P'_accept = min(1, P_steered(x) / P_draft(x)) ──────────
+        # 使用 P_steered 替代原始 P_target，形式与 C3 相同，但分子来自 logit 域注入
+        p_accept_prime = min(1.0, p_steered_x / p_draft_x)
+
+        # ── 拒绝时从 logit_steered 采样（而非 logit_target）──────────────
+        # 原始未缩放的 steered logit（供 _sample_token 使用）
+        # logit_steered_raw = logit_target + α · (logit_draft - logit_base)（无温度缩放）
+        logit_steered_raw = ctx.logit_target[..., :v_min] \
+                            + self._alpha * (ctx.logit_draft[..., :v_min]
+                                             - ctx.logit_base[..., :v_min])  # [1, v_min]
+
+        if ctx.t_sample == 0.0:
+            if p_accept_prime >= 1.0:
+                return AcceptResult(
+                    accepted=True,
+                    chosen_token_id=x,
+                    reason="c10_greedy_accepted",
+                    delta_p=delta_p,
+                    p_draft=p_draft_x,
+                    p_target=p_steered_x,
+                )
+            else:
+                chosen = _argmax_token(logit_steered_raw)
+                return AcceptResult(
+                    accepted=False,
+                    chosen_token_id=chosen,
+                    reason="c10_greedy_rejected",
+                    delta_p=delta_p,
+                    p_draft=p_draft_x,
+                    p_target=p_steered_x,
+                )
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True,
+                chosen_token_id=x,
+                reason="c10_accepted",
+                delta_p=delta_p,
+                p_draft=p_draft_x,
+                p_target=p_steered_x,
+            )
+        else:
+            chosen = _sample_token(logit_steered_raw, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c10_rejected",
+                delta_p=delta_p,
+                p_draft=p_draft_x,
+                p_target=p_steered_x,
+            )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -1418,6 +1577,12 @@ def create_strategy(
         return SoftGuidanceC9(
             lam=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.05)),
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C10:
+        return SoftGuidanceC10(
+            alpha=alpha,
             signal_params=signal_params,
         )
 
