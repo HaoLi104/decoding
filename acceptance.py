@@ -1557,7 +1557,7 @@ class SoftGuidanceC11(AcceptanceStrategy):
             ctx.logit_base.shape[-1],
         )
         logit_t_raw = ctx.logit_target[..., :v_min]   # [1, v_min]（原始，无温度）
-        logit_d_raw = ctx.logit_draft [..  , :v_min]  # [1, v_min]
+        logit_d_raw = ctx.logit_draft[..., :v_min]  # [1, v_min]
         logit_b_raw = ctx.logit_base  [..., :v_min]   # [1, v_min]
 
         if x >= v_min:
