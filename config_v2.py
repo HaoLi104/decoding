@@ -25,6 +25,7 @@ class StrategyType(Enum):
     SOFT_GUIDANCE_C6  = "soft_guidance_c6"   # 策略 C6：双信号联合门控（C4 × C5，Draft 自信 AND Target 懵逼）
     SOFT_GUIDANCE_C7  = "soft_guidance_c7"   # 策略 C7：C3 框架 + C6 双信号动态 α（概率域直接补贴 + 联合门控）
     SOFT_GUIDANCE_C8  = "soft_guidance_c8"   # 策略 C8：C6 变体，门控信号 S_t 改为 token 级 ΔP(x)（消融全局 vs token 级门控）
+    SOFT_GUIDANCE_C9  = "soft_guidance_c9"   # 策略 C9：二值 token 级门控 + 线性 ΔP（去掉 C8 的平方，α_t = λ·I(ΔP>τ)·H_t/H_max）
 
 
 class ExecutionArch(Enum):

@@ -1213,6 +1213,128 @@ class SoftGuidanceC8(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C9：二值 token 级门控 + 线性 ΔP（去掉 C8 的隐式平方）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC9(AcceptanceStrategy):
+    """策略 C9：二值 token 级门控 + 线性 ΔP（Binary Token-Level Gate + Linear ΔP）。
+
+    动机：
+        C8 将门控信号从步级 S_t 改为 token 级 ΔP(x)，带来精度提升，
+        但由于 α_t 中已含 ΔP(x)，最终 bonus ∝ (ΔP(x))²（隐式平方）。
+        平方放大是代数副产品，并非主动设计。
+
+        C9 将门控改为"纯二值（binary）"：只用 I(ΔP(x) > τ) 决定是否激活，
+        不再把 ΔP(x) 的大小带入 α_t，从而将 ΔP(x) 恢复为线性出现一次：
+
+            α_t = λ · I(ΔP(x) > τ) · (H_t / H_max)
+
+        bonus 展开后：
+            bonus_C9 = α_t · ΔP(x)
+                     = λ · I(ΔP(x) > τ) · ΔP(x) · (H_t / H_max) · P_d(x)
+
+        对比 C8：
+            bonus_C8 = λ · I(ΔP(x) > τ) · (ΔP(x))² · (H_t / H_max) · P_d(x)
+
+        C9 vs C8 的唯一区别：bonus 中 ΔP(x) 的次数：C9 线性（一次），C8 平方（两次）。
+
+    设计含义：
+        - 门控：I(ΔP(x) > τ)         ——纯二值，判断"是否是领域词"
+        - 幅度：ΔP(x) × H_t/H_max   ——领域优势 × Target 不确定性，两信号线性独立
+        - 不存在因"用同一量计算门控和幅度"引起的自放大
+
+    消融价值（C8 vs C9）：
+        若 C9 > C8：说明线性 ΔP 已足够，平方放大过于激进（过注入）
+        若 C9 < C8：说明平方放大的"超线性集中"本身有益，幂次比二值门控更精准
+
+    完整验收公式（C1 比值域加法框架）：
+        P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP(x))
+
+    超参数：
+        lambda  (--alpha) : 最大注入强度 λ
+        c4_tau  (--c4_tau): ΔP(x) 激活阈值 τ（默认 0.05）
+    """
+
+    def __init__(
+        self,
+        lam:           float,
+        c4_tau:        float,
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._lam    = lam
+        self._tau    = c4_tau
+        self._params = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        # ── 计算 ΔP(x)：token 级领域信号 ─────────────────────────────────
+        # ΔP(x) = P_draft(x) - P_base(x)  # shape: scalar
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+
+        # ── C9 二值 token 级门控：I(ΔP(x) > τ) ───────────────────────────
+        # 仅判断是否激活（on/off），不把 ΔP(x) 的大小带入 α_t
+        # 与 C8 的区别：C8 的 alpha_t 含 ΔP(x) → bonus ∝ (ΔP)²
+        #               C9 的 alpha_t 不含 ΔP(x) → bonus ∝ ΔP（线性）
+        gate = 1.0 if delta_p > self._tau else 0.0   # binary {0, 1}
+
+        # ── C5 信号：H_t / H_max（Target 输出熵归一化）───────────────────
+        p_target_full = F.softmax(ctx.logit_target / t, dim=-1)  # [1, V_target]
+        h_t = float(
+            -torch.sum(p_target_full * torch.log(p_target_full + 1e-12)).item()
+        )
+        h_max     = math.log(p_target_full.shape[-1])   # log(V) ≈ 11.93
+        c5_factor = h_t / h_max                          # ∈ [0, 1]
+
+        # ── 二值门控 × 熵权：α_t = λ · I(ΔP(x) > τ) · (H_t / H_max) ────
+        # bonus = α_t · ΔP(x) = λ · I(ΔP(x)>τ) · ΔP(x) · (H_t/H_max)  [线性]
+        alpha_t = self._lam * gate * c5_factor            # scalar
+
+        # ── P_target(x) ──────────────────────────────────────────────────
+        p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c9_draft_prob_zero",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+        # ── C1 框架：P'_accept = min(1, P_t/P_d + α_t · ΔP(x)) ──────────
+        # bonus_C9 = α_t · ΔP(x) = λ · I(ΔP>τ) · ΔP(x) · H_t/H_max  [线性一次]
+        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+
+        reason_tag = "binary_gated" if gate > 0.0 else "passthrough"
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True,
+                chosen_token_id=x,
+                reason=f"c9_{reason_tag}_accepted",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+        else:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason=f"c9_{reason_tag}_rejected",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -1288,7 +1410,13 @@ def create_strategy(
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C8:
         return SoftGuidanceC8(
             lam=alpha,
-            # C8 的 τ 作用在 ΔP(x) 上（值域约 [-0.5, 0.5]），默认取 0.05
+            c4_tau=float(kwargs.get("c4_tau", 0.05)),
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C9:
+        return SoftGuidanceC9(
+            lam=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.05)),
             signal_params=signal_params,
         )
