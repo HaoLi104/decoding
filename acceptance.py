@@ -1653,6 +1653,115 @@ class SoftGuidanceC11(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C12：C9 同构 + logit 域标量 bonus（仅提案 token x，无全词表注入）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC12(AcceptanceStrategy):
+    """策略 C12：与 C9 相同的 **比值域验收骨架**，bonus 改为 **logit 域标量**（仅 x）。
+
+    **与 C9 相同**：
+        - α_t = λ · I(门控) · (H_t / H_max)，其中 H_t 由 Target 全分布 softmax 熵得到（标量）
+        - P'_accept = min(1, P_target(x)/P_draft(x) + α_t · bonus)
+        - 拒绝时仅从 **原始** logit_target 采样/argmax，**不**构造 steered 全词表分布
+
+    **与 C9 不同**（相对 C11 的修正）：
+        - 门控：I(δ > τ)，δ = (logit_D(x) - logit_B(x)) / T_fixed（与 C11 门控同一标量）
+        - bonus：δ（**不是** ΔP；**不是** 全词表 logit_steered + softmax）
+
+    注：δ 与严格意义下的 log(P_D(x)/P_B(x)) 因各模型 partition 不同而略有偏差，
+    此处与 C11 一致，作为 **logit 域 token 级领域强度** 的工程定义。
+    """
+
+    def __init__(
+        self,
+        lam:           float,
+        c4_tau:        float,
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._lam    = lam
+        self._tau    = c4_tau
+        self._params = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        v_d = ctx.logit_draft.shape[-1]
+        v_b = ctx.logit_base.shape[-1]
+        v_t = ctx.logit_target.shape[-1]
+        if x >= v_d or x >= v_b or x >= v_t:
+            chosen = _argmax_token(ctx.logit_target) if ctx.t_sample == 0.0 \
+                     else _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c12_vocab_boundary",
+                delta_p=0.0,
+                p_draft=0.0,
+                p_target=0.0,
+            )
+
+        # ── δ：提案 token x 上的 logit 差 / T_fixed（标量，与 C11 门控一致）────
+        logit_dx = float(ctx.logit_draft[0, x].item())   # scalar
+        logit_bx = float(ctx.logit_base[0, x].item())   # scalar
+        delta_logit_x = (logit_dx - logit_bx) / t       # scalar
+
+        # ── 二值 token 级门控：I(δ > τ) ───────────────────────────────────
+        gate = 1.0 if delta_logit_x > self._tau else 0.0   # binary {0, 1}
+
+        # ── C5：H_t / H_max（全词表 softmax 仅用于熵标量，非注入）──────────
+        p_target_full = F.softmax(ctx.logit_target / t, dim=-1)  # shape: [1, V_target]
+        h_t = float(
+            -torch.sum(p_target_full * torch.log(p_target_full + 1e-12)).item()
+        )
+        h_max     = math.log(p_target_full.shape[-1])
+        c5_factor = h_t / h_max
+
+        alpha_t = self._lam * gate * c5_factor   # scalar
+
+        # ── ΔP、p_draft、p_target（与 C9 相同来源，遥测 + 分母）────────────
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+        p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c12_draft_prob_zero",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+
+        # ── C9 骨架：比值域 + 标量 bonus（bonus = δ，非全表 PoE）──────────
+        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_logit_x)
+
+        reason_tag = "binary_gated" if gate > 0.0 else "passthrough"
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True,
+                chosen_token_id=x,
+                reason=f"c12_{reason_tag}_accepted",
+                delta_p=delta_p,
+                p_draft=p_draft,
+                p_target=p_target,
+            )
+        chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+        return AcceptResult(
+            accepted=False,
+            chosen_token_id=chosen,
+            reason=f"c12_{reason_tag}_rejected",
+            delta_p=delta_p,
+            p_draft=p_draft,
+            p_target=p_target,
+        )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -1749,6 +1858,13 @@ def create_strategy(
         return SoftGuidanceC11(
             lam=alpha,
             # τ 作用于 Δlogit 域（默认 0.1 ≈ P_d/P_b > 1.1×）
+            c4_tau=float(kwargs.get("c4_tau", 0.1)),
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C12:
+        return SoftGuidanceC12(
+            lam=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.1)),
             signal_params=signal_params,
         )

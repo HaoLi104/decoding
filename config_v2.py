@@ -28,6 +28,7 @@ class StrategyType(Enum):
     SOFT_GUIDANCE_C9  = "soft_guidance_c9"   # 策略 C9：二值 token 级门控 + 线性 ΔP（去掉 C8 的平方，α_t = λ·I(ΔP>τ)·H_t/H_max）
     SOFT_GUIDANCE_C10 = "soft_guidance_c10"  # 策略 C10：Logit 域 Product of Experts（logit_steered = logit_T + α·(logit_D - logit_B)，固定 α）
     SOFT_GUIDANCE_C11 = "soft_guidance_c11"  # 策略 C11：Logit 域 PoE + C9 二值 token 级门控 + 熵权（动态 α_t = λ·I(Δlogit>τ)·H_t/H_max）
+    SOFT_GUIDANCE_C12 = "soft_guidance_c12"  # 策略 C12：C9 同构比值域验收 + 仅 x 处 logit 标量 bonus（无全词表注入）
 
 
 class ExecutionArch(Enum):
