@@ -295,7 +295,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--flip_jsonl", required=True)
     p.add_argument("--tokenizer",  required=True, help="与 Target 一致的 tokenizer 路径")
     p.add_argument("--out_dir",    required=True)
-    p.add_argument("--round",      type=int, required=True)
+    p.add_argument("--round",      type=str, required=True,
+                   help="round 标识（可为 int 字符串如 '0' 或带后缀如 '0_v2' 区分变体）")
 
     p.add_argument("--max_samples",      type=int, default=30000,
                    help="经 add_balance + 通用锚点 后的最大总样本数（默认 30000）")
