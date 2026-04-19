@@ -107,9 +107,23 @@ def load_model(model_path: str):
     return tokenizer, model
 
 
-def build_prompt(item: dict, tokenizer, dataset_name: str = "medqa") -> str:
-    """使用 data_loader.format_prompt()，与 run_benchmark.py 完全相同的 prompt。"""
-    return format_prompt(tokenizer, item["question"], item["options"], dataset_name=dataset_name)
+def build_prompt(
+    item: dict,
+    tokenizer,
+    dataset_name: str = "medqa",
+    prompt_mode: str = "baseline",
+) -> str:
+    """使用 data_loader.format_prompt()，与 run_benchmark.py 完全相同的 prompt。
+
+    prompt_mode:
+      "baseline" (默认): 与第一点 DSSD baseline 完全一致；
+      "thinking"       : 切换到 DAF 第二点的长推理 prompt（仅消融用）。
+    """
+    return format_prompt(
+        tokenizer, item["question"], item["options"],
+        dataset_name=dataset_name,
+        prompt_mode=(None if prompt_mode == "baseline" else prompt_mode),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +137,7 @@ def evaluate(
     max_new_tokens: int = 256,
     batch_size: int = 1,   # 严格 batch_size=1，避免 padding 导致准确率下降
     dataset_name: str = "medqa",
+    prompt_mode: str = "baseline",
 ) -> dict:
     device = next(model.parameters()).device
 
@@ -134,7 +149,9 @@ def evaluate(
     for idx in tqdm(range(len(dataset)), desc="评测"):
         item = dataset[idx]
 
-        prompt_text = build_prompt(item, tokenizer, dataset_name=dataset_name)
+        prompt_text = build_prompt(item, tokenizer,
+                                   dataset_name=dataset_name,
+                                   prompt_mode=prompt_mode)
         enc = tokenizer(prompt_text, return_tensors="pt")
         input_ids   = enc["input_ids"].to(device)      # [1, L_in]
         prompt_len  = input_ids.shape[1]
@@ -202,6 +219,9 @@ def main() -> None:
     parser.add_argument("--batch_size",     type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=256)
     parser.add_argument("--out",     required=True, help="结果 JSON 输出路径")
+    parser.add_argument("--prompt_mode", choices=["baseline", "thinking"], default="baseline",
+                        help="baseline=与第一点完全一致的 prompt（默认）；"
+                             "thinking=长推理 prompt（DAF 第二点消融用）")
     args = parser.parse_args()
 
     if args.dataset == "jecqa":
@@ -227,12 +247,14 @@ def main() -> None:
         max_new_tokens=args.max_new_tokens,
         batch_size=args.batch_size,
         dataset_name=args.dataset,
+        prompt_mode=args.prompt_mode,
     )
 
     model_name = Path(args.model).name
-    result["model"]      = model_name
-    result["model_path"] = args.model
-    result["dataset"]    = args.dataset
+    result["model"]       = model_name
+    result["model_path"]  = args.model
+    result["dataset"]     = args.dataset
+    result["prompt_mode"] = args.prompt_mode
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -243,6 +265,7 @@ def main() -> None:
     print(f"\n{'='*50}")
     print(f"  模型:        {model_name}")
     print(f"  数据集:      {args.dataset}")
+    print(f"  prompt_mode: {args.prompt_mode}")
     print(f"  样本数:      {result['n_cases']}")
     print(f"  Accuracy:    {result['accuracy']:.4f}  ({result['n_correct']}/{result['n_cases']})")
     print(f"  Tokens/sec:  {result['tokens_per_sec']:.1f}")
