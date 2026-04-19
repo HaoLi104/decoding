@@ -6,7 +6,7 @@
 输出（plan 2.4.1）：
   daf_round{k}_train.json     LLaMA-Factory alpaca 格式
   daf_round{k}_val.json       小规模验证集（默认 5%）
-  daf_round{k}_train_anchor.json   含 25% Alpaca 通用数据（推荐用于实际训练）
+  daf_round{k}_train_with_meta.json   含 _meta 调试字段的副本
 
   并打印一段可粘贴到 LLaMA-Factory `data/dataset_info.json` 的注册片段，
   自动写入 dataset_info.json（若 --dataset_info_json 指定）。
@@ -15,20 +15,34 @@
   对每个 flip 事件 (prefix_ids, A=target_top1, B=draft_token, F=True)：
     - 正样本 (flip)     : instruction=<prefix 文本>, output=<token B 文本> → 教 Target 学习 Draft 的领域知识
     - 平衡样本 (anti-flip): instruction=<prefix 文本>, output=<token A 文本> → 教 Target 保持自身判断
-                          （等价于 plan 中 "F=0 步, output=A_t"）
   由此每个 flip 事件产生 1:1 正/平衡对，避免单边过拟合。
+  额外可加 25% tatsu-lab/alpaca 通用数据作为格式锚。
 
-  额外可加 25% tatsu-lab/alpaca 通用数据作为格式锚（DAF 文档 2.4.1）。
+内容过滤（v2 增强，针对结构 token 主导问题）：
+  --exclude_special_tokens : 跳过 token_B 为 tokenizer.all_special_ids 的 flip
+                             （如 <|im_end|>, <|im_start|>, eos）
+  --exclude_template_words : 跳过 token_B 解码后属于答题模板词的 flip
+                             （内置：Final/answer/Answer/answer:/Final answer/单字母 A-D 等）
+  --min_token_id           : 跳过 token_B id < N 的 flip（默认 0=不过滤）；
+                             Qwen 词表里 < ~200 的多为 ASCII 标点 / 数字 / 空白
+  --keep_meta              : train.json 中保留 meta 字段（默认 False，向后兼容 LLaMA-Factory）
 
 用法（远端）：
+  # v1: 不过滤
   python -m daf.build_flip_sft_data \
       --flip_jsonl logs/daf_round0/flip_events_round0.jsonl \
       --tokenizer  /data/ocean/decoding/model/Qwen/Qwen2.5-32B-Instruct \
-      --out_dir    /data/ocean/decoding/data \
-      --round      0 \
-      --general_ratio 0.25 \
-      --max_samples 30000 \
-      --val_ratio 0.05 \
+      --out_dir    /data/ocean/decoding/data --round 0 \
+      --max_samples 2500 \
+      --dataset_info_json /data/ocean/decoding/LLaMA-Factory/data/dataset_info.json
+
+  # v2: 过滤结构/模板 token
+  python -m daf.build_flip_sft_data \
+      --flip_jsonl logs/daf_round0/flip_events_round0.jsonl \
+      --tokenizer  /data/ocean/decoding/model/Qwen/Qwen2.5-32B-Instruct \
+      --out_dir    /data/ocean/decoding/data --round 0_v2 \
+      --max_samples 2500 \
+      --exclude_special_tokens --exclude_template_words --min_token_id 200 \
       --dataset_info_json /data/ocean/decoding/LLaMA-Factory/data/dataset_info.json
 """
 
@@ -77,6 +91,28 @@ def _decode_token(tok, token_id: int) -> str:
     return text
 
 
+# 答题模板词黑名单：用于过滤"结构 flip"。
+# 设计原则：以「strip().lower()」后的纯文本匹配，覆盖 MedMCQA / 通用考试模板。
+_TEMPLATE_WORDS = {
+    "final", "answer", "answers", "final answer", "the answer is", "therefore",
+    "the", "is", "of", "and", "or", "to", "in", "a", "an",
+    ":", ".", ",", "?", "!", ";", "-", "—", "(", ")", "[", "]", "{", "}",
+    "</s>", "<s>", "<|endoftext|>",
+    # 选项字母（单字母不能作为 flip 监督，因为它正是答案本身）
+    "a", "b", "c", "d", "e",
+}
+
+
+def _is_template_token_text(text: str) -> bool:
+    """判断 token 解码文本是否属于答题模板词。"""
+    if not text:
+        return True
+    norm = text.strip().lower()
+    if not norm:
+        return True
+    return norm in _TEMPLATE_WORDS
+
+
 # ---------------------------------------------------------------------------
 # 通用 alpaca 锚点
 # ---------------------------------------------------------------------------
@@ -108,27 +144,47 @@ def _load_general_alpaca(limit: int) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def build_sft_records(
-    flip_jsonl:       Path,
+    flip_jsonl:              Path,
     tokenizer,
-    max_flip_events:  int,
-    max_prefix_len:   int,
-    add_balance:      bool,
-    rng:              random.Random,
-) -> List[Dict[str, Any]]:
+    max_flip_events:         int,
+    max_prefix_len:          int,
+    add_balance:             bool,
+    rng:                     random.Random,
+    exclude_special_tokens:  bool = False,
+    exclude_template_words:  bool = False,
+    min_token_id:            int = 0,
+) -> Dict[str, Any]:
     """读 flip_jsonl，每个 flip 事件展开为 (1 + add_balance) 条 alpaca 样本。
 
     Args:
-        flip_jsonl:      flip 事件 jsonl 路径
-        tokenizer:       与 Target 共享的 tokenizer
-        max_flip_events: 主循环最多消费多少 flip 事件（与 fdlp_score 对齐建议同值）
-        max_prefix_len:  prefix token 截断上限（左截断）
-        add_balance:     是否对每个 flip 事件再加一条 anti-flip(=A_t) 样本
+        flip_jsonl:             flip 事件 jsonl 路径
+        tokenizer:              与 Target 共享的 tokenizer
+        max_flip_events:        主循环最多消费多少 flip 事件
+        max_prefix_len:         prefix token 截断上限（左截断）
+        add_balance:            是否对每个 flip 事件再加一条 anti-flip(=A_t) 样本
+        exclude_special_tokens: 跳过 token_B 在 tokenizer.all_special_ids 中的 flip
+        exclude_template_words: 跳过 token_B 解码后属于答题模板词的 flip
+        min_token_id:           跳过 token_B id < min_token_id 的 flip（默认 0=不过滤）
 
     Returns:
-        list of {"instruction", "input", "output"} dict
+        {
+          "records": list of alpaca dict (含 _meta 字段),
+          "stats":   {n_consumed, n_dropped_*: ..., n_pos: ..., n_balance: ...}
+        }
     """
     records: List[Dict[str, Any]] = []
-    n_consumed = 0
+    n_consumed       = 0
+    n_pos            = 0
+    n_balance        = 0
+    n_drop_special   = 0
+    n_drop_template  = 0
+    n_drop_min_id    = 0
+    n_drop_decode    = 0
+    n_drop_eq_AB     = 0
+
+    special_ids = set()
+    if exclude_special_tokens:
+        special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
 
     for rec in iter_flip_records(flip_jsonl):
         if n_consumed >= max_flip_events:
@@ -141,47 +197,93 @@ def build_sft_records(
         if not prefix:
             continue
 
+        # ---- 内容过滤（针对正样本 token_B） ----
+        if exclude_special_tokens and rec.B in special_ids:
+            n_drop_special += 1
+            continue
+        if min_token_id > 0 and rec.B < min_token_id:
+            n_drop_min_id += 1
+            continue
+
         try:
             instruction_text = tokenizer.decode(
                 prefix, skip_special_tokens=False, clean_up_tokenization_spaces=False,
             )
         except Exception as exc:
             logger.warning("prefix 解码失败 qid=%s step=%d: %s", rec.qid, rec.step, exc)
+            n_drop_decode += 1
             continue
 
         token_B = _decode_token(tokenizer, rec.B)
         if not token_B:
+            n_drop_decode += 1
             continue
 
-        # 正样本：teach Target → Draft 的领域选择
+        if exclude_template_words and _is_template_token_text(token_B):
+            n_drop_template += 1
+            continue
+
         records.append({
             "instruction": instruction_text,
             "input":       "",
             "output":      token_B,
-            "_meta":       {"qid": rec.qid, "step": rec.step, "kind": "flip_pos",
-                            "delta_p": rec.delta_p, "h_t": rec.h_t},
+            "_meta": {
+                "qid": rec.qid, "step": rec.step, "kind": "flip_positive",
+                "B_id": rec.B, "A_id": rec.A,
+                "delta_p": rec.delta_p, "h_t": rec.h_t,
+            },
         })
+        n_pos += 1
 
         if add_balance:
             token_A = _decode_token(tokenizer, rec.A)
             if not token_A or token_A == token_B:
+                n_drop_eq_AB += 1
                 continue
-            # 平衡样本：保留 Target 自身的偏好，避免单边坍缩
             records.append({
                 "instruction": instruction_text,
                 "input":       "",
                 "output":      token_A,
-                "_meta":       {"qid": rec.qid, "step": rec.step, "kind": "anti_flip",
-                                "delta_p": rec.delta_p, "h_t": rec.h_t},
+                "_meta": {
+                    "qid": rec.qid, "step": rec.step, "kind": "flip_balance",
+                    "B_id": rec.B, "A_id": rec.A,
+                    "delta_p": rec.delta_p, "h_t": rec.h_t,
+                },
             })
+            n_balance += 1
 
     rng.shuffle(records)
-    return records
+
+    stats = {
+        "n_consumed":       n_consumed,
+        "n_pos":            n_pos,
+        "n_balance":        n_balance,
+        "n_drop_special":   n_drop_special,
+        "n_drop_template":  n_drop_template,
+        "n_drop_min_id":    n_drop_min_id,
+        "n_drop_decode":    n_drop_decode,
+        "n_drop_eq_AB":     n_drop_eq_AB,
+        "filter_kept_ratio": (n_pos / n_consumed) if n_consumed else 0.0,
+    }
+    logger.info("flip 过滤统计: %s", stats)
+    return {"records": records, "stats": stats}
 
 
 def _strip_meta(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """去除内部 _meta 字段，输出供 LLaMA-Factory 直接消费的纯 alpaca 格式。"""
     return [{k: v for k, v in r.items() if not k.startswith("_")} for r in records]
+
+
+def _expose_meta(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """将 _meta 暴露为 meta 字段（不带下划线），用于 analyze 脚本读取。
+    若 LLaMA-Factory 严格 schema 检查，仍建议用 _strip_meta 输出 train/val。"""
+    out: List[Dict[str, Any]] = []
+    for r in records:
+        new = {k: v for k, v in r.items() if not k.startswith("_")}
+        if "_meta" in r:
+            new["meta"] = r["_meta"]
+        out.append(new)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +310,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--val_ratio",        type=float, default=0.05)
     p.add_argument("--seed",             type=int, default=42)
 
+    # ---- v2 内容过滤开关（针对结构 token 主导问题） ----
+    p.add_argument("--exclude_special_tokens", action="store_true",
+                   help="跳过 token_B 为 tokenizer.all_special_ids 的 flip（如 <|im_end|>）")
+    p.add_argument("--exclude_template_words", action="store_true",
+                   help="跳过 token_B 解码后属于答题模板词的 flip（如 'Final', 'answer', ':', 单字母）")
+    p.add_argument("--min_token_id",  type=int, default=0,
+                   help="跳过 token_B id 小于该值的 flip（默认 0=不过滤；建议 200 过滤 ASCII 标点/数字）")
+    p.add_argument("--keep_meta", action="store_true",
+                   help="train/val.json 中保留 meta 字段（默认 False，保持 LLaMA-Factory 兼容）")
+
     p.add_argument("--dataset_info_json", default="",
                    help="若指定，自动写入 LLaMA-Factory dataset_info.json")
     return p
@@ -227,14 +339,19 @@ def main() -> None:
     tok = _load_tokenizer(args.tokenizer)
 
     logger.info("从 flip 事件构造 SFT 样本 ...")
-    flip_records = build_sft_records(
+    build_out = build_sft_records(
         flip_jsonl=flip_jsonl,
         tokenizer=tok,
         max_flip_events=args.max_flip_events,
         max_prefix_len=args.max_prefix_len,
         add_balance=args.add_balance,
         rng=rng,
+        exclude_special_tokens=args.exclude_special_tokens,
+        exclude_template_words=args.exclude_template_words,
+        min_token_id=args.min_token_id,
     )
+    flip_records = build_out["records"]
+    flip_stats   = build_out["stats"]
     logger.info("flip 派生样本数 (含 anti-flip): %d", len(flip_records))
 
     # 通用锚点
@@ -264,21 +381,24 @@ def main() -> None:
 
     train_path = out_dir / f"daf_round{args.round}_train.json"
     val_path   = out_dir / f"daf_round{args.round}_val.json"
+
+    # train/val 是否带 meta，由 --keep_meta 决定（默认不带，保持 LLaMA-Factory 兼容）
+    _serialize = _expose_meta if args.keep_meta else _strip_meta
     train_path.write_text(
-        json.dumps(_strip_meta(train_records), ensure_ascii=False, indent=2),
+        json.dumps(_serialize(train_records), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     val_path.write_text(
-        json.dumps(_strip_meta(val_records), ensure_ascii=False, indent=2),
+        json.dumps(_serialize(val_records), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    logger.info("✓ 写入 train: %s", train_path)
+    logger.info("✓ 写入 train: %s  (keep_meta=%s)", train_path, args.keep_meta)
     logger.info("✓ 写入 val:   %s", val_path)
 
-    # 同时保留含 _meta 的可调试副本
+    # 同时保留含 meta 的调试副本（始终生成，便于 analyze 脚本统计）
     train_dbg = out_dir / f"daf_round{args.round}_train_with_meta.json"
     train_dbg.write_text(
-        json.dumps(train_records, ensure_ascii=False, indent=2),
+        json.dumps(_expose_meta(train_records), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
@@ -320,6 +440,11 @@ def main() -> None:
         "max_prefix_len":      args.max_prefix_len,
         "add_balance":         args.add_balance,
         "general_ratio":       args.general_ratio,
+        "exclude_special_tokens": args.exclude_special_tokens,
+        "exclude_template_words": args.exclude_template_words,
+        "min_token_id":           args.min_token_id,
+        "keep_meta":              args.keep_meta,
+        "flip_filter_stats":      flip_stats,
     }
     (out_dir / f"daf_round{args.round}_sft_summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8",

@@ -33,15 +33,17 @@ def _load(path: Path) -> List[dict]:
 def _classify(sample: dict) -> str:
     """根据样本字段判定来源类型。
 
-    规则：
-      - 若 sample 含 'meta.source' → 直接用
-      - 否则按 instruction / output 启发式推断：
-        * instruction 含 '<|im_start|>system' 或 'medical' → flip 类
-        * 其他 → general
+    规则（优先级从高到低）：
+      1. meta.kind → flip_positive / flip_balance（v2 后必有）
+      2. meta.source → 直接用
+      3. instruction 启发式：含 '<|im_start|>system' 或 'medical' → flip_or_balance
     """
-    meta = sample.get("meta") or {}
-    if isinstance(meta, dict) and "source" in meta:
-        return str(meta["source"])
+    meta = sample.get("meta") or sample.get("_meta") or {}
+    if isinstance(meta, dict):
+        if "kind" in meta:
+            return str(meta["kind"])
+        if "source" in meta:
+            return str(meta["source"])
 
     instr = (sample.get("instruction") or "").lower()
     if "<|im_start|>system" in instr or "medical" in instr or "postgraduate" in instr:
@@ -121,11 +123,10 @@ def _show_each_kind(samples: List[dict], n_show: int) -> None:
 
 
 def _check_flip_balance_pairs(samples: List[dict]) -> None:
-    """如样本带 meta.flip_qid + meta.kind ∈ {flip_positive, flip_balance}，
-    检查正样本与平衡样本数量是否 1:1。"""
+    """如样本带 meta.kind ∈ {flip_positive, flip_balance}，检查 1:1 平衡。"""
     pos = bal = 0
     for s in samples:
-        meta = s.get("meta") or {}
+        meta = s.get("meta") or s.get("_meta") or {}
         if not isinstance(meta, dict):
             continue
         kind = meta.get("kind", "")
@@ -134,12 +135,13 @@ def _check_flip_balance_pairs(samples: List[dict]) -> None:
         elif kind == "flip_balance":
             bal += 1
     if pos == 0 and bal == 0:
-        print("\n=== flip 正/平衡样本检查: meta.kind 缺失，跳过结构检查 ===")
+        print("\n=== flip 正/平衡样本检查: meta.kind 缺失（可能是 v1 旧数据），跳过结构检查 ===")
+        print("    提示：用 --keep_meta 重跑 build_flip_sft_data，或读取 *_train_with_meta.json")
         return
     print(f"\n=== flip 正/平衡样本平衡度 ===")
     print(f"  flip_positive : {pos}")
     print(f"  flip_balance  : {bal}")
-    print(f"  比例 pos:bal  = {pos}/{bal}  → {'OK' if pos == bal else '失衡!'}")
+    print(f"  比例 pos:bal  = {pos}/{bal}  → {'OK (严格 1:1)' if pos == bal else '失衡!'}")
 
 
 def main() -> None:
