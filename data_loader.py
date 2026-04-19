@@ -35,6 +35,34 @@ SYSTEM_PROMPTS: Dict[str, str] = {
         "最后一行必须且只能输出：'Final answer: X'，其中 X 是 A/B/C/D 之一。"
         "最后一行之后不要输出任何文字。"
     ),
+    # ---- DAF 第二点专用 (thinking-mode prompt)：鼓励长推理，提升内容 flip 比例 ----
+    # 仅供 daf.run_flip_logger 收集 flip 时使用；评测仍走原 prompt，保证 baseline 可比。
+    "medqa_thinking": (
+        "You are an experienced clinical physician preparing for the USMLE. "
+        "For each question, walk through your medical reasoning step by step in English. "
+        "Discuss differential diagnoses, anatomical considerations, pharmacology, "
+        "and pathophysiological mechanisms relevant to the question. "
+        "After your detailed reasoning (at least 5-8 sentences), conclude with a single line: "
+        "'Final answer: X' where X is A/B/C/D."
+    ),
+    "medmcqa_thinking": (
+        "You are an experienced clinical physician specializing in the Indian PGMEE exams. "
+        "For each question, walk through your medical reasoning step by step in English. "
+        "Discuss differential diagnoses, surgical/anatomical considerations, pharmacology, "
+        "and pathophysiological mechanisms relevant to the question. "
+        "After your detailed reasoning (at least 5-8 sentences), conclude with a single line: "
+        "'Final answer: X' where X is A/B/C/D."
+    ),
+    "jecqa_thinking": (
+        "你是一位资深中国法律学者。对每道题，请用中文逐步分析法律要件、相关法条、判例与例外情形，"
+        "至少展开 5-8 句话的推理。"
+        "最后一行必须且只能输出：'Final answer: X'，其中 X 是 A/B/C/D 之一。"
+    ),
+    "cmb_thinking": (
+        "你是一位资深中国临床医师，参加医师资格考试。对每道题，请用中文逐步分析症状、鉴别诊断、"
+        "病理机制、药理及解剖要点，至少展开 5-8 句话的推理。"
+        "最后一行必须且只能输出：'Final answer: X'，其中 X 是 A/B/C/D 之一。"
+    ),
 }
 
 # 向后兼容：默认 SYSTEM_PROMPT 指向 medqa
@@ -454,6 +482,7 @@ def format_prompt(
     question: str,
     options,
     dataset_name: str = "medqa",
+    prompt_mode: Optional[str] = None,
 ) -> str:
     """将题目与选项格式化为 Qwen Chat 模板字符串。
 
@@ -461,11 +490,14 @@ def format_prompt(
         tokenizer:    用于 apply_chat_template
         question:     题干文本
         options:      list[str] 或 dict {"A": ..., "B": ...}
-        dataset_name: "medqa" 或 "jecqa"，决定 system prompt 与用户引导语
+        dataset_name: "medqa" / "medmcqa" / "jecqa" / "cmb"，决定 baseline system prompt
+        prompt_mode:  None=默认行为（与第一点 baseline 完全一致，绝不破坏可比性）；
+                      "thinking"=DAF 第二点专用，加载 {dataset}_thinking 长推理 prompt 与
+                      "step by step"风格的 user_content，鼓励 5-8 句话医学/法律推理，
+                      显著提升内容 flip 比例。仅供 daf.run_flip_logger 等收集脚本使用。
 
-    向后兼容：默认 dataset_name="medqa"，行为与旧版完全一致。
+    向后兼容：默认 prompt_mode=None → 行为与旧版完全一致，第一点全部脚本无需改动。
     """
-    # 规范化选项文本
     opt_lines: List[str] = []
     if isinstance(options, dict):
         for key in sorted(options.keys()):
@@ -474,9 +506,35 @@ def format_prompt(
     else:
         opt_lines = [f"{chr(65+i)}. {str(opt).strip()}" for i, opt in enumerate(list(options))]
 
+    is_zh = dataset_name in ("jecqa", "cmb")
+
+    # ---- thinking-mode 分支（DAF 第二点专用，新增逻辑）----
+    if prompt_mode == "thinking":
+        thinking_key = f"{dataset_name}_thinking"
+        sys_prompt = SYSTEM_PROMPTS.get(thinking_key, SYSTEM_PROMPTS.get(dataset_name, SYSTEM_PROMPT))
+        if is_zh:
+            user_content = (
+                question.strip() + "\n" + "\n".join(opt_lines)
+                + "\n\n请逐步给出你的推理：分析题干涉及的关键要素，依次评估各选项的合理性，"
+                + "至少展开 5-8 句话；之后再用一行写 'Final answer: X'（X 为 A/B/C/D 之一）。"
+            )
+        else:
+            user_content = (
+                question.strip() + "\n" + "\n".join(opt_lines)
+                + "\n\nThink step by step. Walk through the relevant medical/clinical reasoning, "
+                + "discuss key options, then conclude with one line 'Final answer: X' "
+                + "where X is A/B/C/D."
+            )
+        messages = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user",   "content": user_content},
+        ]
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+    # ---- 默认/baseline 分支（原始逻辑，逐字未改，确保第一点可比性）----
     sys_prompt = SYSTEM_PROMPTS.get(dataset_name, SYSTEM_PROMPT)
 
-    if dataset_name in ("jecqa", "cmb"):
+    if is_zh:
         user_content = (
             question.strip()
             + "\n"

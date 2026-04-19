@@ -229,6 +229,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--out_dir", required=True)
     p.add_argument("--seed", type=int, default=42)
 
+    # ---- DAF 第二点专用：prompt 模式切换（不影响第一点 baseline）----
+    p.add_argument("--prompt_mode", choices=["baseline", "thinking"], default="baseline",
+                   help="baseline=与第一点完全一致的严格 prompt（默认）；"
+                        "thinking=DAF 专用长推理 prompt，鼓励 5-8 句话医学推理，显著提升内容 flip 比例")
     return p
 
 
@@ -313,7 +317,9 @@ def main() -> None:
         sample_id = str(item.get("id", idx))
 
         prompt_text = format_prompt(
-            bundle.tokenizer, item["question"], item["options"], dataset_name=args.dataset,
+            bundle.tokenizer, item["question"], item["options"],
+            dataset_name=args.dataset,
+            prompt_mode=(None if args.prompt_mode == "baseline" else args.prompt_mode),
         )
         prompt_ids_t = bundle.tokenizer(prompt_text, return_tensors="pt")["input_ids"].to(device)
         prompt_ids   = prompt_ids_t[0].tolist()
@@ -404,6 +410,8 @@ def main() -> None:
         "dataset":       f"{args.dataset}/{args.subject}/{args.split}",
         "limit":         args.limit,
         "flip_jsonl":    str(flip_jsonl_path),
+        "prompt_mode":   args.prompt_mode,
+        "max_new_tokens": args.max_new_tokens,
     })
     summary_path.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8",
