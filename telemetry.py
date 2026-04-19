@@ -44,6 +44,10 @@ class StepTelemetry:
         accepted:          是否接受 draft_token_id
         override_triggered: 是否触发了 Hard Override（B0/B 策略）
         strategy_reason:   来自 AcceptResult.reason 的决策字符串
+        final_token_id:    实际进入序列的 token id（accept→draft；reject→correction；DAF 第二点扩展）
+        is_flip:           本步是否为 token flip 事件，定义为：accepted ∧ draft_token_id != target_top1_id
+                           （DAF 飞轮第二点的核心监督信号；可空保持向后兼容）
+        target_entropy:    本步 Target 分布熵 H_t（nats，DAF 用于熵权与 entropy 对照）
     """
     step:               int
     draft_token_id:     int
@@ -55,6 +59,9 @@ class StepTelemetry:
     accepted:           bool
     override_triggered: bool
     strategy_reason:    str
+    final_token_id:     Optional[int]  = None
+    is_flip:            Optional[bool] = None
+    target_entropy:     Optional[float] = None
 
 
 # ---------------------------------------------------------------------------

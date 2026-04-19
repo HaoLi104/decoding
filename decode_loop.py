@@ -340,11 +340,23 @@ class SpeculativeDecodeLoop:
                 "override" in result.reason.lower()
             )
 
+            # DAF 飞轮第二点：token flip 事件 = 接受 draft ∧ draft 不是 target argmax
+            target_top1_id = int(logit_target.argmax(dim=-1).item())
+            is_flip = bool(
+                result.accepted and (draft_token != target_top1_id)
+            )
+
+            # DAF 第二点：Target 分布熵 H_t（用于对照打分 / 熵权重，T_sample=0 时仍按原始 logits 算）
+            #   probs shape: [V]    log_probs shape: [V]
+            target_probs = torch.softmax(logit_target.squeeze(0).float(), dim=-1)
+            target_log_probs = torch.log(target_probs.clamp(min=1e-12))
+            target_entropy = float(-(target_probs * target_log_probs).sum().item())
+
             # 构造本步遥测
             step_tel = StepTelemetry(
                 step=global_step_start + pos_i,
                 draft_token_id=draft_token,
-                target_top1_id=int(logit_target.argmax(dim=-1).item()),
+                target_top1_id=target_top1_id,
                 base_top1_id=int(logit_base.argmax(dim=-1).item()),
                 delta_p=result.delta_p,
                 p_draft=result.p_draft,
@@ -352,6 +364,9 @@ class SpeculativeDecodeLoop:
                 accepted=result.accepted,
                 override_triggered=override_triggered,
                 strategy_reason=result.reason,
+                final_token_id=int(result.chosen_token_id),
+                is_flip=is_flip,
+                target_entropy=target_entropy,
             )
             telemetry_list.append(step_tel)
             self._telemetry.log_step(step_tel)
