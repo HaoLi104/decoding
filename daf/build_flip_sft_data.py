@@ -91,26 +91,35 @@ def _decode_token(tok, token_id: int) -> str:
     return text
 
 
-# 答题模板词黑名单：用于过滤"结构 flip"。
-# 设计原则：以「strip().lower()」后的纯文本匹配，覆盖 MedMCQA / 通用考试模板。
-_TEMPLATE_WORDS = {
+# 答题模板词黑名单（分级）：
+#   strict  : 仅过滤"答题模板核心词" + 单字母答案 + 纯标点 / 特殊 token
+#   default : strict + 高频英文连接词（the / is / of / and ...）
+#   loose   : 等价于 strict（保留所有连接词，因为它们仍可能携带语义）
+_TEMPLATE_WORDS_STRICT = {
     "final", "answer", "answers", "final answer", "the answer is", "therefore",
-    "the", "is", "of", "and", "or", "to", "in", "a", "an",
     ":", ".", ",", "?", "!", ";", "-", "—", "(", ")", "[", "]", "{", "}",
     "</s>", "<s>", "<|endoftext|>",
-    # 选项字母（单字母不能作为 flip 监督，因为它正是答案本身）
+    # 单字母答案选项（"a"/"b"/"c"/"d"/"e"——它们正是被预测的答案本身，作为监督信号无意义）
     "a", "b", "c", "d", "e",
+}
+_TEMPLATE_WORDS_DEFAULT = _TEMPLATE_WORDS_STRICT | {
+    "the", "is", "of", "and", "or", "to", "in", "an",
+}
+_TEMPLATE_WORDS_PRESETS = {
+    "strict":  _TEMPLATE_WORDS_STRICT,
+    "default": _TEMPLATE_WORDS_DEFAULT,
+    "loose":   _TEMPLATE_WORDS_STRICT,
 }
 
 
-def _is_template_token_text(text: str) -> bool:
+def _is_template_token_text(text: str, blacklist: set) -> bool:
     """判断 token 解码文本是否属于答题模板词。"""
     if not text:
         return True
     norm = text.strip().lower()
     if not norm:
         return True
-    return norm in _TEMPLATE_WORDS
+    return norm in blacklist
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +161,7 @@ def build_sft_records(
     rng:                     random.Random,
     exclude_special_tokens:  bool = False,
     exclude_template_words:  bool = False,
+    template_strictness:     str  = "default",
     min_token_id:            int = 0,
 ) -> Dict[str, Any]:
     """读 flip_jsonl，每个 flip 事件展开为 (1 + add_balance) 条 alpaca 样本。
@@ -186,6 +196,10 @@ def build_sft_records(
     if exclude_special_tokens:
         special_ids = set(getattr(tokenizer, "all_special_ids", []) or [])
 
+    blacklist = _TEMPLATE_WORDS_PRESETS.get(template_strictness, _TEMPLATE_WORDS_DEFAULT)
+    if exclude_template_words:
+        logger.info("template_strictness=%s  blacklist size=%d", template_strictness, len(blacklist))
+
     for rec in iter_flip_records(flip_jsonl):
         if n_consumed >= max_flip_events:
             break
@@ -219,7 +233,7 @@ def build_sft_records(
             n_drop_decode += 1
             continue
 
-        if exclude_template_words and _is_template_token_text(token_B):
+        if exclude_template_words and _is_template_token_text(token_B, blacklist):
             n_drop_template += 1
             continue
 
@@ -316,6 +330,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="跳过 token_B 为 tokenizer.all_special_ids 的 flip（如 <|im_end|>）")
     p.add_argument("--exclude_template_words", action="store_true",
                    help="跳过 token_B 解码后属于答题模板词的 flip（如 'Final', 'answer', ':', 单字母）")
+    p.add_argument("--template_strictness", choices=["strict", "default", "loose"], default="default",
+                   help="模板黑名单等级；strict/loose 仅过滤'答题核心词+标点+单字母'，default 额外过滤 the/is/of/and 等连接词")
     p.add_argument("--min_token_id",  type=int, default=0,
                    help="跳过 token_B id 小于该值的 flip（默认 0=不过滤；建议 200 过滤 ASCII 标点/数字）")
     p.add_argument("--keep_meta", action="store_true",
@@ -349,6 +365,7 @@ def main() -> None:
         rng=rng,
         exclude_special_tokens=args.exclude_special_tokens,
         exclude_template_words=args.exclude_template_words,
+        template_strictness=args.template_strictness,
         min_token_id=args.min_token_id,
     )
     flip_records = build_out["records"]
@@ -443,6 +460,7 @@ def main() -> None:
         "general_ratio":       args.general_ratio,
         "exclude_special_tokens": args.exclude_special_tokens,
         "exclude_template_words": args.exclude_template_words,
+        "template_strictness":    args.template_strictness,
         "min_token_id":           args.min_token_id,
         "keep_meta":              args.keep_meta,
         "flip_filter_stats":      flip_stats,
