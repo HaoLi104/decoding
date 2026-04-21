@@ -57,12 +57,15 @@ class VerifyContext:
         logit_draft:    Draft  模型对该位置的 next-token logits，shape [1, vocab_size]
         logit_base:     Base   模型对该位置的 next-token logits，shape [1, vocab_size]
         t_sample:       全局采样温度（0=贪婪；0.6=随机采样）
+        proposal_idx:   本 token 在当前 Draft 提案序列中的 0-indexed 位置（0 表最近提案）；
+                        默认 0 以向后兼容不感知位置的策略
     """
     draft_token_id: int
     logit_target:   torch.Tensor   # shape: [1, vocab_size]
     logit_draft:    torch.Tensor   # shape: [1, vocab_size]
     logit_base:     torch.Tensor   # shape: [1, vocab_size]
     t_sample:       float
+    proposal_idx:   int = 0
 
 
 @dataclass
@@ -1912,6 +1915,302 @@ class SoftGuidanceC13(AcceptanceStrategy):
 
 
 # ---------------------------------------------------------------------------
+# 策略 C14：C13 + 提案位置衰减（α_t 随 k 指数衰减）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC14(AcceptanceStrategy):
+    """策略 C14：在 C13（局部 Logit PoE）基础上叠加 **提案位置衰减**。
+
+    动机：
+        Draft 提案序列 (x_0, x_1, …, x_{γ-1}) 中，x_k 是在 "x_0..x_{k-1} 全部正确"
+        前提下生成的，k 越大累积误差越严重（实验里第 1 个 token 接受率 ~70%，
+        第 5 个 ~20%）。因此领域注入强度也应随 k 衰减——前位置值得强注入；
+        后位置即使 Δlogit 很大，也大概率是 Draft 被自己先前错误放大的"假领域信号"。
+
+    公式：
+        α_t = α_base · ρ^{k} · I(Δlogit(x) > τ) · H_t / H_{max}
+        其中 k = ctx.proposal_idx（0-indexed），ρ = c14_decay ∈ (0, 1]
+        k=0 时 ρ^0 = 1（等价于 C13）；ρ=1 时整条公式也退化到 C13。
+
+    其余（局部 PoE 闭式、拒绝采样）完全与 C13 相同。
+
+    超参数：
+        alpha_base (--alpha)    : 最大注入强度 α_base（k=0 时）
+        c4_tau  (--c4_tau)      : 二值门控阈值 τ（默认 0.1）
+        decay   (--c14_decay)   : 位置衰减因子 ρ（默认 0.5）
+    """
+
+    def __init__(
+        self,
+        alpha_base:    float,
+        c4_tau:        float,
+        decay:         float,
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._alpha_base = alpha_base
+        self._tau        = c4_tau
+        self._decay      = max(0.0, min(1.0, decay))   # clip 到 [0, 1]
+        self._params     = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+        k = max(int(ctx.proposal_idx), 0)   # 0-indexed 提案位置
+
+        v_d = ctx.logit_draft.shape[-1]
+        v_b = ctx.logit_base.shape[-1]
+        v_t = ctx.logit_target.shape[-1]
+        if x >= v_d or x >= v_b or x >= v_t:
+            chosen = _argmax_token(ctx.logit_target) if ctx.t_sample == 0.0 \
+                     else _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason="c14_vocab_boundary",
+                delta_p=0.0, p_draft=0.0, p_target=0.0,
+            )
+
+        logit_dx = float(ctx.logit_draft[0, x].item())
+        logit_bx = float(ctx.logit_base[0, x].item())
+        delta_logit_x = (logit_dx - logit_bx) / t        # scalar
+
+        gate = 1.0 if delta_logit_x > self._tau else 0.0
+
+        p_target_full = F.softmax(ctx.logit_target / t, dim=-1)   # shape: [1, V]
+        h_t = float(
+            -torch.sum(p_target_full * torch.log(p_target_full + 1e-12)).item()
+        )
+        h_max     = math.log(p_target_full.shape[-1])
+        c5_factor = h_t / h_max
+
+        # ── 位置衰减：ρ^k（k=0 时为 1） ────────────────────────────────
+        decay_factor = self._decay ** k                    # scalar ∈ [0, 1]
+
+        alpha_t = self._alpha_base * gate * c5_factor * decay_factor
+
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+        p_target_x = float(p_target_full[0, x].item())
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason="c14_draft_prob_zero",
+                delta_p=delta_p, p_draft=p_draft, p_target=p_target_x,
+            )
+
+        # ── 局部 PoE 解析闭式（与 C13 完全相同） ───────────────────────
+        if alpha_t > 0.0:
+            exponent = alpha_t * delta_logit_x
+            if exponent > 50.0:
+                p_target_prime_x = 1.0
+            else:
+                rho              = math.exp(exponent)
+                denom            = 1.0 - p_target_x + p_target_x * rho
+                p_target_prime_x = (p_target_x * rho) / max(denom, 1e-12)
+        else:
+            p_target_prime_x = p_target_x
+
+        p_accept_prime = max(0.0, min(1.0, p_target_prime_x / p_draft))
+
+        reason_tag = f"binary_gated_k{k}" if gate > 0.0 else f"passthrough_k{k}"
+
+        def _build_local_steered_logit() -> torch.Tensor:
+            steered = ctx.logit_target.clone()   # shape: [1, V]
+            if alpha_t > 0.0:
+                steered[0, x] = steered[0, x] + alpha_t * (logit_dx - logit_bx)
+            return steered
+
+        if ctx.t_sample == 0.0:
+            if p_accept_prime >= 1.0:
+                return AcceptResult(
+                    accepted=True, chosen_token_id=x,
+                    reason=f"c14_greedy_{reason_tag}_accepted",
+                    delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+                )
+            chosen = _argmax_token(_build_local_steered_logit())
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason=f"c14_greedy_{reason_tag}_rejected",
+                delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+            )
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True, chosen_token_id=x,
+                reason=f"c14_{reason_tag}_accepted",
+                delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+            )
+        chosen = _sample_token(_build_local_steered_logit(), ctx.t_sample)
+        return AcceptResult(
+            accepted=False, chosen_token_id=chosen,
+            reason=f"c14_{reason_tag}_rejected",
+            delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 策略 C15：C13 + 目标接受率反解 α（Implicit-α / Trust Region）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC15(AcceptanceStrategy):
+    """策略 C15：以 **目标接受率** a* 为超参，反解每步的 α_t（Implicit-α）。
+
+    动机：
+        C9/C12/C13 都把 α_base 当作超参去网格搜索，但实验结果（C12 的 α_base
+        最优点在 3.5，C9 在 100，C13 预计在 1–3）说明 α_base 本身没有**绝对
+        语义**——它的最优值强依赖于 Δlogit / ΔP 的量纲。更自然的做法：
+        直接规定"我希望每步的验收成功概率 ≈ a*"，然后反解 α_t。
+
+    反解推导（基于 C13 的局部 PoE 闭式）：
+        局部 PoE：P'_T(x) = P_T · ρ / (1 - P_T + P_T · ρ)，ρ = exp(α_t · Δlogit(x))
+        验收：   P'_accept = min(1, P'_T(x) / P_D(x))
+        目标：   令 P'_accept = a*（且 ≤ 1）   ⇒   P'_T(x) = q，q = a* · P_D(x)
+
+        若 q ≥ 1       → Target 补贴后必然 accept，α_t = α_max
+        若 P_T(x) ≥ q  → Target 已经比目标还自信，α_t = 0（passthrough；
+                          此时 P'_accept = min(1, P_T/P_D) ≥ a*）
+        否则（含正解）：
+            ρ   = q(1 - P_T) / (P_T(1 - q))       >  1
+            α_t = ln(ρ) / Δlogit(x)                >  0
+            最后 clip 到 [0, α_max]，再前向计算真实 ρ 和 P'_T 做验收
+            （clip 后可能 P'_accept < a*，即有部分步达不到目标，这是预期行为）
+
+    门控：
+        Δlogit(x) ≤ τ 时直接关闭（α_t = 0），避免反向注入 / 低信号过拟合。
+
+    超参数：
+        target_accept  (--alpha)      : 目标接受率 a* ∈ (0, 1]（复用 --alpha 槽位，
+                                        推荐搜索 0.50 / 0.60 / 0.70 / 0.80 / 0.90）
+        c4_tau         (--c4_tau)     : Δlogit 门控阈值 τ（默认 0.1）
+        alpha_max      (--c15_alpha_max): 反解 α 的上限（默认 50.0）
+    """
+
+    def __init__(
+        self,
+        target_accept: float,
+        c4_tau:        float,
+        alpha_max:     float,
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._a_star    = max(1e-6, min(1.0, target_accept))   # 语义上 ∈ (0, 1]
+        self._tau       = c4_tau
+        self._alpha_max = max(1e-6, alpha_max)
+        self._params    = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        v_d = ctx.logit_draft.shape[-1]
+        v_b = ctx.logit_base.shape[-1]
+        v_t = ctx.logit_target.shape[-1]
+        if x >= v_d or x >= v_b or x >= v_t:
+            chosen = _argmax_token(ctx.logit_target) if ctx.t_sample == 0.0 \
+                     else _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason="c15_vocab_boundary",
+                delta_p=0.0, p_draft=0.0, p_target=0.0,
+            )
+
+        logit_dx = float(ctx.logit_draft[0, x].item())
+        logit_bx = float(ctx.logit_base[0, x].item())
+        delta_logit_x = (logit_dx - logit_bx) / t       # scalar
+
+        # ── 门控：Δlogit > τ 且 > 0 时才反解 α ──────────────────────────
+        gated = (delta_logit_x > self._tau) and (delta_logit_x > 1e-6)
+
+        p_target_full = F.softmax(ctx.logit_target / t, dim=-1)   # shape: [1, V]
+        p_target_x = float(p_target_full[0, x].item())
+
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason="c15_draft_prob_zero",
+                delta_p=delta_p, p_draft=p_draft, p_target=p_target_x,
+            )
+
+        # ── 反解 α_t ─────────────────────────────────────────────────
+        q = self._a_star * p_draft                           # 目标 P'_T(x)
+        reason_tag: str
+        if not gated:
+            alpha_t    = 0.0
+            reason_tag = "passthrough_gate_off"
+        elif q >= 1.0 - 1e-9:
+            alpha_t    = self._alpha_max
+            reason_tag = "saturated_q_geq_1"
+        elif p_target_x >= q:
+            alpha_t    = 0.0
+            reason_tag = "passthrough_target_already_confident"
+        else:
+            # ρ* = q(1 - P_T) / (P_T(1 - q))，保证 > 1
+            numerator   = q * (1.0 - p_target_x)
+            denominator = p_target_x * (1.0 - q)
+            if denominator < 1e-12 or numerator <= 0.0:
+                alpha_t    = self._alpha_max
+                reason_tag = "solved_numerical_fallback"
+            else:
+                rho_star  = numerator / denominator              # > 1
+                alpha_raw = math.log(rho_star) / delta_logit_x   # > 0（Δlogit>0）
+                alpha_t   = max(0.0, min(alpha_raw, self._alpha_max))
+                reason_tag = "solved" if alpha_t == alpha_raw else "solved_clipped"
+
+        # ── 用 (可能被 clip 的) α_t 前向算真实 P'_T(x) / P'_accept ────
+        if alpha_t > 0.0:
+            exponent = alpha_t * delta_logit_x
+            if exponent > 50.0:
+                p_target_prime_x = 1.0
+            else:
+                rho_real         = math.exp(exponent)
+                denom            = 1.0 - p_target_x + p_target_x * rho_real
+                p_target_prime_x = (p_target_x * rho_real) / max(denom, 1e-12)
+        else:
+            p_target_prime_x = p_target_x
+
+        p_accept_prime = max(0.0, min(1.0, p_target_prime_x / p_draft))
+
+        def _build_local_steered_logit() -> torch.Tensor:
+            steered = ctx.logit_target.clone()   # shape: [1, V]
+            if alpha_t > 0.0:
+                steered[0, x] = steered[0, x] + alpha_t * (logit_dx - logit_bx)
+            return steered
+
+        if ctx.t_sample == 0.0:
+            if p_accept_prime >= 1.0:
+                return AcceptResult(
+                    accepted=True, chosen_token_id=x,
+                    reason=f"c15_greedy_{reason_tag}_accepted",
+                    delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+                )
+            chosen = _argmax_token(_build_local_steered_logit())
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason=f"c15_greedy_{reason_tag}_rejected",
+                delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+            )
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True, chosen_token_id=x,
+                reason=f"c15_{reason_tag}_accepted",
+                delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+            )
+        chosen = _sample_token(_build_local_steered_logit(), ctx.t_sample)
+        return AcceptResult(
+            accepted=False, chosen_token_id=chosen,
+            reason=f"c15_{reason_tag}_rejected",
+            delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+        )
+
+
+# ---------------------------------------------------------------------------
 # 工厂函数
 # ---------------------------------------------------------------------------
 
@@ -2023,6 +2322,22 @@ def create_strategy(
         return SoftGuidanceC13(
             alpha_base=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.1)),
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C14:
+        return SoftGuidanceC14(
+            alpha_base=alpha,
+            c4_tau=float(kwargs.get("c4_tau", 0.1)),
+            decay=float(kwargs.get("c14_decay", 0.5)),
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C15:
+        return SoftGuidanceC15(
+            target_accept=alpha,
+            c4_tau=float(kwargs.get("c4_tau", 0.1)),
+            alpha_max=float(kwargs.get("c15_alpha_max", 50.0)),
             signal_params=signal_params,
         )
 

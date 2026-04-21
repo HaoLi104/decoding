@@ -331,6 +331,7 @@ class SpeculativeDecodeLoop:
                 logit_draft=logit_draft,
                 logit_base=logit_base,
                 t_sample=self._config.t_sample,
+                proposal_idx=pos_i,  # 0-indexed：0 = 最近提案，C14 位置衰减用
             )
 
             result: AcceptResult = self._strategy.evaluate(ctx)

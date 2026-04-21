@@ -30,6 +30,8 @@ class StrategyType(Enum):
     SOFT_GUIDANCE_C11 = "soft_guidance_c11"  # 策略 C11：Logit 域 PoE + C9 二值 token 级门控 + 熵权（动态 α_t = λ·I(Δlogit>τ)·H_t/H_max）
     SOFT_GUIDANCE_C12 = "soft_guidance_c12"  # 策略 C12：C9 同构比值域验收 + 仅 x 处 logit 标量 bonus（无全词表注入）
     SOFT_GUIDANCE_C13 = "soft_guidance_c13"  # 策略 C13：局部 Logit PoE（只在 x 维做 PoE 注入，解析闭式验收）
+    SOFT_GUIDANCE_C14 = "soft_guidance_c14"  # 策略 C14：C13 + 提案位置衰减（α_t 随 k 指数衰减）
+    SOFT_GUIDANCE_C15 = "soft_guidance_c15"  # 策略 C15：C13 + 目标接受率反解 α（Implicit-α / trust-region）
 
 
 class ExecutionArch(Enum):
@@ -99,6 +101,10 @@ class DecodeConfig:
     c2_topk:         int   = 5       # topk 变体的 K 值
     # C4 专用：动态门控阈值 τ（信号强度 S_t = max(P_draft) - max(P_base) 的触发阈值）
     c4_tau:          float = 0.1     # 低于此阈值时 α_t = 0（稀疏激活）
+    # C14 专用：提案位置衰减因子 ρ ∈ (0, 1]（α_t 额外乘以 ρ^k，k = 0-indexed 提案位置）
+    c14_decay:       float = 0.5     # ρ=1 退化为 C13；ρ=0 只给 k=0 注入
+    # C15 专用：α 反解时的数值上限（防止 ρ 指数爆炸 / Δlogit 过小时反解溢出）
+    c15_alpha_max:   float = 50.0    # 反解得到的 α_t clip 到 [0, alpha_max]
 
 
 # ---------------------------------------------------------------------------

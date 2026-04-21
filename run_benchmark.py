@@ -511,6 +511,8 @@ def run_single_config(
         c2_variant=config.c2_variant,
         c2_topk=config.c2_topk,
         c4_tau=config.c4_tau,
+        c14_decay=config.c14_decay,
+        c15_alpha_max=config.c15_alpha_max,
     )
 
     config_tag = (
@@ -666,6 +668,8 @@ def run_grid_search(
     c2_variant:   str   = "full",
     c2_topk:      int   = 5,
     c4_tau:       float = 0.1,
+    c14_decay:    float = 0.5,
+    c15_alpha_max: float = 50.0,
 ) -> List[BenchmarkResult]:
     """Strategy × α × T_sample 的正交网格搜索。
 
@@ -701,6 +705,8 @@ def run_grid_search(
                     c2_variant=c2_variant,
                     c2_topk=c2_topk,
                     c4_tau=c4_tau,
+                    c14_decay=c14_decay,
+                    c15_alpha_max=c15_alpha_max,
                 )
                 result = run_single_config(
                     config=cfg,
@@ -857,6 +863,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "  当 S_t > τ 时才激活领域注入，否则 α_t=0（稀疏激活，默认 0.1）"
         ),
     )
+    p.add_argument(
+        "--c14_decay",
+        type=float,
+        default=0.5,
+        help=(
+            "C14 提案位置衰减因子 ρ ∈ (0, 1]（仅对 soft_guidance_c14 生效）：\n"
+            "  α_t 随 Draft 提案位置 k (0-indexed) 乘以 ρ^k 衰减\n"
+            "  ρ=1 退化为 C13；ρ=0.5（默认）下 k=2 时强度降至 25%"
+        ),
+    )
+    p.add_argument(
+        "--c15_alpha_max",
+        type=float,
+        default=50.0,
+        help=(
+            "C15 反解 α_t 的数值上限（仅对 soft_guidance_c15 生效，默认 50）：\n"
+            "  当 Δlogit(x) 过小或目标 q 过大时反解会发散，clip 到 [0, alpha_max]"
+        ),
+    )
 
     p.add_argument(
         "--aggregate_summaries_only",
@@ -996,6 +1021,8 @@ def main() -> None:
         c2_variant=args.c2_variant,
         c2_topk=args.c2_topk,
         c4_tau=args.c4_tau,
+        c14_decay=args.c14_decay,
+        c15_alpha_max=args.c15_alpha_max,
     )
 
     # 与目录内已有单配置 summary 合并（续跑时 summary_table 含全部实验）
