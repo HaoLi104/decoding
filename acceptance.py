@@ -385,7 +385,7 @@ class SoftGuidanceC1(AcceptanceStrategy):
             )
 
         # P'_accept = min(1, P_target / P_draft + α · ΔP)
-        p_accept_prime = min(1.0, (p_target / p_draft) + self._alpha * delta_p)
+        p_accept_prime = max(0.0, min(1.0, (p_target / p_draft) + self._alpha * delta_p))
 
         if torch.rand(1).item() < p_accept_prime:
             return AcceptResult(
@@ -596,7 +596,7 @@ class SoftGuidanceC3(AcceptanceStrategy):
         p_target_prime = p_target + self._alpha * delta_p  # float，概率域线性叠加
 
         # Step 2: 标准 SD 验收 — P'_accept = min(1, P'_target / P_draft)
-        p_accept_prime = min(1.0, p_target_prime / p_draft)
+        p_accept_prime = max(0.0, min(1.0, p_target_prime / p_draft))
 
         # 贪婪模式（t_sample=0）：确定性接受判据
         if ctx.t_sample == 0.0:
@@ -668,7 +668,7 @@ class SoftGuidanceC4(AcceptanceStrategy):
         P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP)
 
     超参数：
-        alpha_base (--alpha): 信号强度放大系数 α_base（论文 λ 参数）
+        alpha_base (--alpha): 信号强度放大系数 α_base（论文 α_base 参数）
         c4_tau (--c4_tau):    激活阈值 τ（默认 0.1）
     """
 
@@ -714,7 +714,7 @@ class SoftGuidanceC4(AcceptanceStrategy):
 
         # ── C1 公式 + 动态 α ─────────────────────────────────────────────
         # P'_accept = min(1, P_target/P_draft + α_t · ΔP)
-        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+        p_accept_prime = max(0.0, min(1.0, (p_target / p_draft) + alpha_t * delta_p))
 
         reason_tag = "gated" if alpha_t > 0.0 else "passthrough"
 
@@ -757,28 +757,28 @@ class SoftGuidanceC5(AcceptanceStrategy):
         H_max = log(V)   （V = Target 词表大小）
 
     动态 α 计算：
-        α_t = λ · H_t / H_max
+        α_t = α_base · H_t / H_max
 
     论文故事（Uncertainty-Driven Routing）：
         - Target 遇到通用语法/事实，熵低（确定），α_t → 0，Draft 闲置；
-        - Target 遇到医学专有名词/临床推理，熵高（懵逼），α_t → λ，
+        - Target 遇到医学专有名词/临床推理，熵高（懵逼），α_t → α_base，
           Draft 的领域先验被最大程度引入，实现"按需路由"。
-        - λ（即 --alpha）控制最大注入强度上限。
+        - α_base（即 --alpha）控制最大注入强度上限。
 
     完整验收公式（沿用 C1 的比值域加法框架）：
         P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP)
 
     超参数：
-        lambda (--alpha): 最大注入强度 λ（H_t/H_max=1 时退化为 C1 的 α）
+        alpha_base (--alpha): 最大注入强度 α_base（H_t/H_max=1 时退化为 C1 的 α）
     """
 
     def __init__(
         self,
-        lam:           float,          # λ，对应 CLI --alpha
+        alpha_base:    float,          # α_base，对应 CLI --alpha（网格搜索的固定基础系数）
         signal_params: DomainSignalParams,
     ) -> None:
-        self._lam    = lam
-        self._params = signal_params
+        self._alpha_base = alpha_base
+        self._params     = signal_params
 
     def evaluate(self, ctx: VerifyContext) -> AcceptResult:
         x = ctx.draft_token_id
@@ -793,9 +793,9 @@ class SoftGuidanceC5(AcceptanceStrategy):
         # H_max = log(V)，词表均匀时的理论最大熵
         h_max = math.log(p_target_full.shape[-1])  # ≈ log(152064) ≈ 11.93
 
-        # ── 动态 α：α_t = λ · H_t / H_max ──────────────────────────────
-        # H_t / H_max ∈ [0, 1]，α_t ∈ [0, λ]
-        alpha_t = self._lam * (h_t / h_max)
+        # ── 动态 α：α_t = α_base · H_t / H_max ──────────────────────────────
+        # H_t / H_max ∈ [0, 1]，α_t ∈ [0, α_base]
+        alpha_t = self._alpha_base * (h_t / h_max)
 
         # ── 计算 ΔP 与各模型对 draft token 的概率 ───────────────────────
         delta_p, p_draft, _ = compute_delta_p(
@@ -816,7 +816,7 @@ class SoftGuidanceC5(AcceptanceStrategy):
 
         # ── C1 公式 + 熵驱动 α ──────────────────────────────────────────
         # P'_accept = min(1, P_target/P_draft + α_t · ΔP)
-        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+        p_accept_prime = max(0.0, min(1.0, (p_target / p_draft) + alpha_t * delta_p))
 
         if torch.rand(1).item() < p_accept_prime:
             return AcceptResult(
@@ -849,12 +849,12 @@ class SoftGuidanceC6(AcceptanceStrategy):
     C4 和 C5 的信号正交（一个来自 Draft-Base 外部对比，一个来自 Target 内部不确定性），
     将两者相乘得到联合动态 α：
 
-        α_t = λ · I(S_t > τ) · S_t · (H_t / H_max)
+        α_t = α_base · I(S_t > τ) · S_t · (H_t / H_max)
 
     物理解读（双重 AND 门）：
       - S_t ≤ τ → α_t = 0：Draft 无显著领域优势，完全不注入（C4 门关闭）
       - H_t ≈ 0 → α_t ≈ 0：Target 对该 token 极度自信，无需外援（C5 权重接近 0）
-      - S_t > τ AND H_t 高 → α_t = λ·S_t·(H_t/H_max)：Draft 自信 + Target 懵逼，
+      - S_t > τ AND H_t 高 → α_t = α_base·S_t·(H_t/H_max)：Draft 自信 + Target 懵逼，
         "两个条件同时满足"才强力注入，最大程度减少误触发，精准攻击领域盲区。
 
     论文故事（Dual-Signal Routing）：
@@ -866,19 +866,19 @@ class SoftGuidanceC6(AcceptanceStrategy):
         P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP)
 
     超参数：
-        lambda  (--alpha): 联合信号的最大注入强度 λ
+        alpha_base (--alpha): 联合信号的最大注入强度 α_base
         c4_tau  (--c4_tau): C4 门的激活阈值 τ（默认 0.1）
     """
 
     def __init__(
         self,
-        lam:           float,          # λ，对应 CLI --alpha
+        alpha_base:    float,          # α_base，对应 CLI --alpha（网格搜索的固定基础系数）
         c4_tau:        float,          # τ，C4 稀疏激活阈值
         signal_params: DomainSignalParams,
     ) -> None:
-        self._lam    = lam
-        self._tau    = c4_tau
-        self._params = signal_params
+        self._alpha_base = alpha_base
+        self._tau        = c4_tau
+        self._params     = signal_params
 
     def evaluate(self, ctx: VerifyContext) -> AcceptResult:
         x = ctx.draft_token_id
@@ -901,8 +901,8 @@ class SoftGuidanceC6(AcceptanceStrategy):
         c5_factor = h_t / h_max  # ∈ [0, 1]
 
         # ── 联合动态 α：两信号相乘 ────────────────────────────────────────
-        # α_t = λ · I(S_t > τ) · S_t · (H_t / H_max)
-        alpha_t = self._lam * c4_factor * c5_factor
+        # α_t = α_base · I(S_t > τ) · S_t · (H_t / H_max)
+        alpha_t = self._alpha_base * c4_factor * c5_factor
 
         # ── 计算 ΔP 与各模型对 draft token 的概率 ───────────────────────
         delta_p, p_draft, _ = compute_delta_p(
@@ -923,7 +923,7 @@ class SoftGuidanceC6(AcceptanceStrategy):
 
         # ── C1 框架：比值域加法 + 联合动态 α ─────────────────────────────
         # P'_accept = min(1, P_target/P_draft + α_t · ΔP)
-        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+        p_accept_prime = max(0.0, min(1.0, (p_target / p_draft) + alpha_t * delta_p))
 
         # 判断是否触发（用于 reason tag，方便遥测分析）
         dual_triggered = c4_factor > 0.0  # C4 门已开，C5 连续权重始终参与
@@ -969,7 +969,7 @@ class SoftGuidanceC7(AcceptanceStrategy):
             Step 1（局部校准）：P'_target(x) = P_target(x) + α_t · ΔP
             Step 2（标准验收）：P'_accept = min(1, P'_target(x) / P_draft(x))
 
-        其中双信号动态 α_t = λ · I(S_t>τ) · S_t · H_t/H_max（与 C6 完全相同）。
+        其中双信号动态 α_t = α_base · I(S_t>τ) · S_t · H_t/H_max（与 C6 完全相同）。
 
     C7 vs C6 的唯一区别：
         C6: bonus = α_t · ΔP · P_d(x)   ← C1 框架，隐式 P_d 乘积
@@ -982,19 +982,19 @@ class SoftGuidanceC7(AcceptanceStrategy):
         拒绝时回退到 argmax(logit_target)。
 
     超参数：
-        lambda  (--alpha): 联合信号最大注入强度 λ
+        alpha_base (--alpha): 联合信号最大注入强度 α_base
         c4_tau  (--c4_tau): C4 稀疏激活阈值 τ（默认 0.1）
     """
 
     def __init__(
         self,
-        lam:           float,
+        alpha_base:    float,
         c4_tau:        float,
         signal_params: DomainSignalParams,
     ) -> None:
-        self._lam    = lam
-        self._tau    = c4_tau
-        self._params = signal_params
+        self._alpha_base = alpha_base
+        self._tau        = c4_tau
+        self._params     = signal_params
 
     def evaluate(self, ctx: VerifyContext) -> AcceptResult:
         x = ctx.draft_token_id
@@ -1015,8 +1015,8 @@ class SoftGuidanceC7(AcceptanceStrategy):
         c5_factor = h_t / h_max  # ∈ [0, 1]
 
         # ── 联合动态 α（与 C6 相同）─────────────────────────────────────────
-        # α_t = λ · I(S_t > τ) · S_t · H_t/H_max
-        alpha_t = self._lam * c4_factor * c5_factor
+        # α_t = α_base · I(S_t > τ) · S_t · H_t/H_max
+        alpha_t = self._alpha_base * c4_factor * c5_factor
 
         # ── 计算 ΔP 与各模型对 draft token 的概率 ───────────────────────────
         delta_p, p_draft, _ = compute_delta_p(
@@ -1039,7 +1039,7 @@ class SoftGuidanceC7(AcceptanceStrategy):
         # Step 1: P'_target(x) = P_target(x) + α_t · ΔP （纯概率域补贴）
         # Step 2: P'_accept = min(1, P'_target / P_draft)
         p_target_prime = p_target + alpha_t * delta_p
-        p_accept_prime = min(1.0, p_target_prime / p_draft)
+        p_accept_prime = max(0.0, min(1.0, p_target_prime / p_draft))
 
         # 贪婪模式（t_sample=0）：确定性接受（继承 C3 的判据）
         if ctx.t_sample == 0.0:
@@ -1108,15 +1108,15 @@ class SoftGuidanceC8(AcceptanceStrategy):
             「Draft 对这个具体 token x，比 Base 更偏爱吗？」
 
     动态 α（token 级门控 + C5 熵权）：
-        α_t = λ · I(ΔP(x) > τ) · ΔP(x) · (H_t / H_max)
+        α_t = α_base · I(ΔP(x) > τ) · ΔP(x) · (H_t / H_max)
 
     等价 bonus（在 C1 框架展开后）：
         bonus_C8 = α_t · ΔP(x) · P_d(x)
-                 = λ · I(ΔP(x)>τ) · (ΔP(x))² · (H_t/H_max) · P_d(x)
+                 = α_base · I(ΔP(x)>τ) · (ΔP(x))² · (H_t/H_max) · P_d(x)
 
     与 C6 的比较：
-        C6: bonus = λ · I(S_t>τ) · S_t · ΔP(x) · (H_t/H_max) · P_d(x)   [S_t 和 ΔP 不同量]
-        C8: bonus = λ · I(ΔP(x)>τ) · (ΔP(x))² · (H_t/H_max) · P_d(x)  [ΔP 出现两次，自放大]
+        C6: bonus = α_base · I(S_t>τ) · S_t · ΔP(x) · (H_t/H_max) · P_d(x)   [S_t 和 ΔP 不同量]
+        C8: bonus = α_base · I(ΔP(x)>τ) · (ΔP(x))² · (H_t/H_max) · P_d(x)  [ΔP 出现两次，自放大]
 
     消融价值：
         - 若 C8 > C6：说明 token 级门控更精准，全局 S_t 引入了误触发噪音
@@ -1126,19 +1126,19 @@ class SoftGuidanceC8(AcceptanceStrategy):
         P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP(x))
 
     超参数：
-        lambda  (--alpha) : 最大注入强度 λ
+        alpha_base (--alpha) : 最大注入强度 α_base
         c4_tau  (--c4_tau): ΔP(x) 门控阈值 τ（默认 0.05，比 C6 的 0.1 略低，因为 ΔP 值域更小）
     """
 
     def __init__(
         self,
-        lam:           float,
+        alpha_base:    float,
         c4_tau:        float,
         signal_params: DomainSignalParams,
     ) -> None:
-        self._lam    = lam
-        self._tau    = c4_tau
-        self._params = signal_params
+        self._alpha_base = alpha_base
+        self._tau        = c4_tau
+        self._params     = signal_params
 
     def evaluate(self, ctx: VerifyContext) -> AcceptResult:
         x = ctx.draft_token_id
@@ -1165,9 +1165,9 @@ class SoftGuidanceC8(AcceptanceStrategy):
         c5_factor = h_t / h_max                          # ∈ [0, 1]
 
         # ── 联合动态 α（token 级双信号）────────────────────────────────────
-        # α_t = λ · I(ΔP(x) > τ) · ΔP(x) · (H_t / H_max)
+        # α_t = α_base · I(ΔP(x) > τ) · ΔP(x) · (H_t / H_max)
         # bonus 展开后 ∝ (ΔP(x))²，自放大效应比 C6 更锐利
-        alpha_t = self._lam * c8_factor * c5_factor       # scalar
+        alpha_t = self._alpha_base * c8_factor * c5_factor       # scalar
 
         # ── 计算 P_target(x) ──────────────────────────────────────────────
         p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
@@ -1186,7 +1186,7 @@ class SoftGuidanceC8(AcceptanceStrategy):
         # ── C1 框架：比值域加法 + token 级联合动态 α ─────────────────────
         # P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP(x))
         # shape: scalar
-        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+        p_accept_prime = max(0.0, min(1.0, (p_target / p_draft) + alpha_t * delta_p))
 
         token_gated = c8_factor > 0.0
         reason_tag  = "token_gated" if token_gated else "passthrough"
@@ -1227,14 +1227,14 @@ class SoftGuidanceC9(AcceptanceStrategy):
         C9 将门控改为"纯二值（binary）"：只用 I(ΔP(x) > τ) 决定是否激活，
         不再把 ΔP(x) 的大小带入 α_t，从而将 ΔP(x) 恢复为线性出现一次：
 
-            α_t = λ · I(ΔP(x) > τ) · (H_t / H_max)
+            α_t = α_base · I(ΔP(x) > τ) · (H_t / H_max)
 
         bonus 展开后：
             bonus_C9 = α_t · ΔP(x)
-                     = λ · I(ΔP(x) > τ) · ΔP(x) · (H_t / H_max) · P_d(x)
+                     = α_base · I(ΔP(x) > τ) · ΔP(x) · (H_t / H_max) · P_d(x)
 
         对比 C8：
-            bonus_C8 = λ · I(ΔP(x) > τ) · (ΔP(x))² · (H_t / H_max) · P_d(x)
+            bonus_C8 = α_base · I(ΔP(x) > τ) · (ΔP(x))² · (H_t / H_max) · P_d(x)
 
         C9 vs C8 的唯一区别：bonus 中 ΔP(x) 的次数：C9 线性（一次），C8 平方（两次）。
 
@@ -1251,19 +1251,19 @@ class SoftGuidanceC9(AcceptanceStrategy):
         P'_accept = min(1, P_target(x)/P_draft(x) + α_t · ΔP(x))
 
     超参数：
-        lambda  (--alpha) : 最大注入强度 λ
+        alpha_base (--alpha) : 最大注入强度 α_base
         c4_tau  (--c4_tau): ΔP(x) 激活阈值 τ（默认 0.05）
     """
 
     def __init__(
         self,
-        lam:           float,
+        alpha_base:    float,
         c4_tau:        float,
         signal_params: DomainSignalParams,
     ) -> None:
-        self._lam    = lam
-        self._tau    = c4_tau
-        self._params = signal_params
+        self._alpha_base = alpha_base
+        self._tau        = c4_tau
+        self._params     = signal_params
 
     def evaluate(self, ctx: VerifyContext) -> AcceptResult:
         x = ctx.draft_token_id
@@ -1289,9 +1289,9 @@ class SoftGuidanceC9(AcceptanceStrategy):
         h_max     = math.log(p_target_full.shape[-1])   # log(V) ≈ 11.93
         c5_factor = h_t / h_max                          # ∈ [0, 1]
 
-        # ── 二值门控 × 熵权：α_t = λ · I(ΔP(x) > τ) · (H_t / H_max) ────
-        # bonus = α_t · ΔP(x) = λ · I(ΔP(x)>τ) · ΔP(x) · (H_t/H_max)  [线性]
-        alpha_t = self._lam * gate * c5_factor            # scalar
+        # ── 二值门控 × 熵权：α_t = α_base · I(ΔP(x) > τ) · (H_t / H_max) ────
+        # bonus = α_t · ΔP(x) = α_base · I(ΔP(x)>τ) · ΔP(x) · (H_t/H_max)  [线性]
+        alpha_t = self._alpha_base * gate * c5_factor            # scalar
 
         # ── P_target(x) ──────────────────────────────────────────────────
         p_target = _prob_at(ctx.logit_target, x, self._params.t_fixed)
@@ -1308,8 +1308,8 @@ class SoftGuidanceC9(AcceptanceStrategy):
             )
 
         # ── C1 框架：P'_accept = min(1, P_t/P_d + α_t · ΔP(x)) ──────────
-        # bonus_C9 = α_t · ΔP(x) = λ · I(ΔP>τ) · ΔP(x) · H_t/H_max  [线性一次]
-        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_p)
+        # bonus_C9 = α_t · ΔP(x) = α_base · I(ΔP>τ) · ΔP(x) · H_t/H_max  [线性一次]
+        p_accept_prime = max(0.0, min(1.0, (p_target / p_draft) + alpha_t * delta_p))
 
         reason_tag = "binary_gated" if gate > 0.0 else "passthrough"
 
@@ -1442,7 +1442,7 @@ class SoftGuidanceC10(AcceptanceStrategy):
 
         # ── 验收：P'_accept = min(1, P_steered(x) / P_draft(x)) ──────────
         # 使用 P_steered 替代原始 P_target，形式与 C3 相同，但分子来自 logit 域注入
-        p_accept_prime = min(1.0, p_steered_x / p_draft_x)
+        p_accept_prime = max(0.0, min(1.0, p_steered_x / p_draft_x))
 
         # ── 拒绝时从 logit_steered 采样（而非 logit_target）──────────────
         # 原始未缩放的 steered logit（供 _sample_token 使用）
@@ -1503,7 +1503,7 @@ class SoftGuidanceC11(AcceptanceStrategy):
     C10 在 logit 域做固定强度的全局 PoE 注入，等价于全程用同一 α 更新所有 token。
     C11 将 C9 的"二值 token 级门控 + Target 熵权"移植到 logit 域，使注入更精准：
 
-        α_t = λ · I(Δlogit(x) > τ) · (H_t / H_max)
+        α_t = α_base · I(Δlogit(x) > τ) · (H_t / H_max)
 
     其中门控信号从 C9 的 ΔP(x) 换为 **Δlogit(x) = logit_draft(x) - logit_base(x)**，
     即对数似然比。这使整个方法完全在 logit 域内自洽：
@@ -1527,24 +1527,24 @@ class SoftGuidanceC11(AcceptanceStrategy):
 
     完整流程：
         1. 计算 Δlogit(x) = logit_draft(x) - logit_base(x)
-        2. 计算 H_t（Target 输出熵），得到 α_t = λ · I(Δlogit(x) > τ) · H_t/H_max
+        2. 计算 H_t（Target 输出熵），得到 α_t = α_base · I(Δlogit(x) > τ) · H_t/H_max
         3. logit_steered = logit_target + α_t · Δlogit  （全词表向量操作，仅当 α_t > 0）
         4. P'_accept = min(1, P_steered(x) / P_draft(x))
 
     超参数：
-        lambda  (--alpha) : 最大注入强度 λ
+        alpha_base (--alpha) : 最大注入强度 α_base
         c4_tau  (--c4_tau): Δlogit(x) 门控阈值 τ（默认 0.1，对应 P_d/P_b > e^0.1 ≈ 1.1×）
     """
 
     def __init__(
         self,
-        lam:           float,
+        alpha_base:    float,
         c4_tau:        float,
         signal_params: DomainSignalParams,
     ) -> None:
-        self._lam    = lam
-        self._tau    = c4_tau
-        self._params = signal_params
+        self._alpha_base = alpha_base
+        self._tau        = c4_tau
+        self._params     = signal_params
 
     def evaluate(self, ctx: VerifyContext) -> AcceptResult:
         x = ctx.draft_token_id
@@ -1587,8 +1587,8 @@ class SoftGuidanceC11(AcceptanceStrategy):
         h_max     = math.log(p_target_full.shape[-1])        # log(V)
         c5_factor = h_t / h_max                              # ∈ [0, 1]
 
-        # ── 动态 α_t = λ · I(Δlogit > τ) · (H_t / H_max) ────────────────
-        alpha_t = self._lam * gate * c5_factor               # scalar
+        # ── 动态 α_t = α_base · I(Δlogit > τ) · (H_t / H_max) ────────────────
+        alpha_t = self._alpha_base * gate * c5_factor               # scalar
 
         # ── Logit 域 PoE 注入（仅当 α_t > 0 时执行） ─────────────────────
         # logit_steered = logit_target + α_t · Δlogit  [1, v_min]
@@ -1619,7 +1619,7 @@ class SoftGuidanceC11(AcceptanceStrategy):
             )
 
         # ── 验收：P'_accept = min(1, P_steered(x) / P_draft(x)) ──────────
-        p_accept_prime = min(1.0, p_steered_x / p_draft_x)
+        p_accept_prime = max(0.0, min(1.0, p_steered_x / p_draft_x))
         reason_tag = "gated" if gate > 0.0 else "passthrough"
 
         if ctx.t_sample == 0.0:
@@ -1660,7 +1660,7 @@ class SoftGuidanceC12(AcceptanceStrategy):
     """策略 C12：与 C9 相同的 **比值域验收骨架**，bonus 改为 **logit 域标量**（仅 x）。
 
     **与 C9 相同**：
-        - α_t = λ · I(门控) · (H_t / H_max)，其中 H_t 由 Target 全分布 softmax 熵得到（标量）
+        - α_t = α_base · I(门控) · (H_t / H_max)，其中 H_t 由 Target 全分布 softmax 熵得到（标量）
         - P'_accept = min(1, P_target(x)/P_draft(x) + α_t · bonus)
         - 拒绝时仅从 **原始** logit_target 采样/argmax，**不**构造 steered 全词表分布
 
@@ -1674,13 +1674,13 @@ class SoftGuidanceC12(AcceptanceStrategy):
 
     def __init__(
         self,
-        lam:           float,
+        alpha_base:    float,
         c4_tau:        float,
         signal_params: DomainSignalParams,
     ) -> None:
-        self._lam    = lam
-        self._tau    = c4_tau
-        self._params = signal_params
+        self._alpha_base = alpha_base
+        self._tau        = c4_tau
+        self._params     = signal_params
 
     def evaluate(self, ctx: VerifyContext) -> AcceptResult:
         x = ctx.draft_token_id
@@ -1717,7 +1717,7 @@ class SoftGuidanceC12(AcceptanceStrategy):
         h_max     = math.log(p_target_full.shape[-1])
         c5_factor = h_t / h_max
 
-        alpha_t = self._lam * gate * c5_factor   # scalar
+        alpha_t = self._alpha_base * gate * c5_factor   # scalar
 
         # ── ΔP、p_draft、p_target（与 C9 相同来源，遥测 + 分母）────────────
         delta_p, p_draft, _ = compute_delta_p(
@@ -1737,7 +1737,7 @@ class SoftGuidanceC12(AcceptanceStrategy):
             )
 
         # ── C9 骨架：比值域 + 标量 bonus（bonus = δ，非全表 PoE）──────────
-        p_accept_prime = min(1.0, (p_target / p_draft) + alpha_t * delta_logit_x)
+        p_accept_prime = max(0.0, min(1.0, (p_target / p_draft) + alpha_t * delta_logit_x))
 
         reason_tag = "binary_gated" if gate > 0.0 else "passthrough"
 
@@ -1758,6 +1758,156 @@ class SoftGuidanceC12(AcceptanceStrategy):
             delta_p=delta_p,
             p_draft=p_draft,
             p_target=p_target,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 策略 C13：局部 Logit PoE（仅在 x 维做 PoE 注入，解析闭式验收）
+# ---------------------------------------------------------------------------
+
+class SoftGuidanceC13(AcceptanceStrategy):
+    """策略 C13：局部 Logit PoE（Local PoE，仅在提案 token x 维做 PoE 注入）。
+
+    与 C10 / C12 的根本差异：
+        C10：logit_steered = logit_T + α·(logit_D - logit_B)   全词表向量加法
+        C12：P'_accept = min(1, P_T/P_D + α_t·δ)                纯标量 bonus，不改 logit
+        C13：只改 logit_T(x) 这一维：
+                 logit'_T(x) = logit_T(x) + α_t · (logit_D(x) - logit_B(x))
+             其他维度保持不变，重新 softmax 归一化后做验收。
+
+    物理意义：
+        - "只在 draft 想说的那个词 x 上做 PoE 更新"，保留 C10 的 PoE 直觉，
+          但避开全词表过矫正；相比 C12，它真正在 logit 域操作（而非把 δ 当作标量）。
+        - 动态 α_t 沿用 C9/C11 的二值门控 + Target 熵权：
+              α_t = α_base · I(Δlogit(x) > τ) · H_t / H_max
+
+    解析闭式推导（只改 x 维时 softmax 的归一化常数可解析展开）：
+        令 Δlogit(x) = (logit_D(x) - logit_B(x)) / T_fixed ，
+            ρ = exp(α_t · Δlogit(x)) = (P_d(x)/P_b(x))^{α_t} · (Z_b/Z_d)^{α_t}
+        由于只改 x 维，其他维度不变，归一化后得：
+              P'_T(x) = P_T(x) · ρ / [1 - P_T(x) + P_T(x) · ρ]
+        验收：
+              P'_accept = min(1, P'_T(x) / P_d(x))
+
+    拒绝时从局部修正分布采样：
+        logit_steered = logit_T.clone();  logit_steered[0, x] += α_t · (logit_D(x) - logit_B(x))
+        采样函数只看相对 logit，效果等价于在 x 上做了局部 PoE 的新分布。
+
+    超参数：
+        alpha_base (--alpha) : 最大注入强度 α_base
+        c4_tau  (--c4_tau)   : 二值门控阈值 τ（作用于 Δlogit，默认 0.1）
+    """
+
+    def __init__(
+        self,
+        alpha_base:    float,
+        c4_tau:        float,
+        signal_params: DomainSignalParams,
+    ) -> None:
+        self._alpha_base = alpha_base
+        self._tau        = c4_tau
+        self._params     = signal_params
+
+    def evaluate(self, ctx: VerifyContext) -> AcceptResult:
+        x = ctx.draft_token_id
+        t = max(self._params.t_fixed, 1e-9)
+
+        v_d = ctx.logit_draft.shape[-1]
+        v_b = ctx.logit_base.shape[-1]
+        v_t = ctx.logit_target.shape[-1]
+        if x >= v_d or x >= v_b or x >= v_t:
+            chosen = _argmax_token(ctx.logit_target) if ctx.t_sample == 0.0 \
+                     else _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False,
+                chosen_token_id=chosen,
+                reason="c13_vocab_boundary",
+                delta_p=0.0, p_draft=0.0, p_target=0.0,
+            )
+
+        # ── Δlogit(x) = (logit_D(x) - logit_B(x)) / t_fixed（温度缩放后）──
+        logit_dx = float(ctx.logit_draft[0, x].item())   # scalar
+        logit_bx = float(ctx.logit_base[0, x].item())   # scalar
+        delta_logit_x = (logit_dx - logit_bx) / t       # scalar
+
+        # ── 二值门控：I(Δlogit > τ) ────────────────────────────────────
+        gate = 1.0 if delta_logit_x > self._tau else 0.0   # binary {0, 1}
+
+        # ── Target 熵权 H_t / H_max（全词表 softmax，仅标量）────────────
+        p_target_full = F.softmax(ctx.logit_target / t, dim=-1)  # shape: [1, V_target]
+        h_t = float(
+            -torch.sum(p_target_full * torch.log(p_target_full + 1e-12)).item()
+        )
+        h_max     = math.log(p_target_full.shape[-1])
+        c5_factor = h_t / h_max
+
+        # ── 动态 α_t ──────────────────────────────────────────────────
+        alpha_t = self._alpha_base * gate * c5_factor   # scalar
+
+        # ── 遥测 + 分母来源：ΔP、P_d(x)、P_T(x) ───────────────────────
+        delta_p, p_draft, _ = compute_delta_p(
+            ctx.logit_draft, ctx.logit_base, x, self._params.t_fixed
+        )
+        p_target_x = float(p_target_full[0, x].item())   # scalar
+
+        if p_draft < 1e-12:
+            chosen = _sample_token(ctx.logit_target, ctx.t_sample)
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason="c13_draft_prob_zero",
+                delta_p=delta_p, p_draft=p_draft, p_target=p_target_x,
+            )
+
+        # ── 局部 PoE 解析闭式：P'_T(x) = P_T(x)·ρ / [1 - P_T(x) + P_T(x)·ρ]
+        if alpha_t > 0.0:
+            # ρ = exp(α_t · Δlogit(x))；防溢出：大 α_t · Δlogit 时直接视作完全转移概率给 x
+            exponent = alpha_t * delta_logit_x
+            if exponent > 50.0:                           # e^50 ≈ 5.2e21，数值上 P'_T(x) → 1
+                p_target_prime_x = 1.0
+            else:
+                rho              = math.exp(exponent)
+                denom            = 1.0 - p_target_x + p_target_x * rho
+                p_target_prime_x = (p_target_x * rho) / max(denom, 1e-12)
+        else:
+            p_target_prime_x = p_target_x
+
+        # ── 验收：P'_accept = min(1, P'_T(x) / P_d(x))  ──────────────
+        p_accept_prime = max(0.0, min(1.0, p_target_prime_x / p_draft))
+
+        reason_tag = "binary_gated" if gate > 0.0 else "passthrough"
+
+        def _build_local_steered_logit() -> torch.Tensor:
+            """拒绝时采样用：只改 x 维（未除温度，与采样函数接口一致）。"""
+            steered = ctx.logit_target.clone()   # shape: [1, V_target]
+            if alpha_t > 0.0:
+                steered[0, x] = steered[0, x] + alpha_t * (logit_dx - logit_bx)
+            return steered
+
+        if ctx.t_sample == 0.0:
+            if p_accept_prime >= 1.0:
+                return AcceptResult(
+                    accepted=True, chosen_token_id=x,
+                    reason=f"c13_greedy_{reason_tag}_accepted",
+                    delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+                )
+            chosen = _argmax_token(_build_local_steered_logit())
+            return AcceptResult(
+                accepted=False, chosen_token_id=chosen,
+                reason=f"c13_greedy_{reason_tag}_rejected",
+                delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+            )
+
+        if torch.rand(1).item() < p_accept_prime:
+            return AcceptResult(
+                accepted=True, chosen_token_id=x,
+                reason=f"c13_{reason_tag}_accepted",
+                delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
+            )
+        chosen = _sample_token(_build_local_steered_logit(), ctx.t_sample)
+        return AcceptResult(
+            accepted=False, chosen_token_id=chosen,
+            reason=f"c13_{reason_tag}_rejected",
+            delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
         )
 
 
@@ -1818,32 +1968,32 @@ def create_strategy(
         )
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C5:
-        return SoftGuidanceC5(lam=alpha, signal_params=signal_params)
+        return SoftGuidanceC5(alpha_base=alpha, signal_params=signal_params)
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C6:
         return SoftGuidanceC6(
-            lam=alpha,
+            alpha_base=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.1)),
             signal_params=signal_params,
         )
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C7:
         return SoftGuidanceC7(
-            lam=alpha,
+            alpha_base=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.1)),
             signal_params=signal_params,
         )
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C8:
         return SoftGuidanceC8(
-            lam=alpha,
+            alpha_base=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.05)),
             signal_params=signal_params,
         )
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C9:
         return SoftGuidanceC9(
-            lam=alpha,
+            alpha_base=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.05)),
             signal_params=signal_params,
         )
@@ -1856,7 +2006,7 @@ def create_strategy(
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C11:
         return SoftGuidanceC11(
-            lam=alpha,
+            alpha_base=alpha,
             # τ 作用于 Δlogit 域（默认 0.1 ≈ P_d/P_b > 1.1×）
             c4_tau=float(kwargs.get("c4_tau", 0.1)),
             signal_params=signal_params,
@@ -1864,7 +2014,14 @@ def create_strategy(
 
     elif strategy_type == StrategyType.SOFT_GUIDANCE_C12:
         return SoftGuidanceC12(
-            lam=alpha,
+            alpha_base=alpha,
+            c4_tau=float(kwargs.get("c4_tau", 0.1)),
+            signal_params=signal_params,
+        )
+
+    elif strategy_type == StrategyType.SOFT_GUIDANCE_C13:
+        return SoftGuidanceC13(
+            alpha_base=alpha,
             c4_tau=float(kwargs.get("c4_tau", 0.1)),
             signal_params=signal_params,
         )
