@@ -1880,26 +1880,34 @@ class SoftGuidanceC13(AcceptanceStrategy):
         reason_tag = "binary_gated" if gate > 0.0 else "passthrough"
 
         def _build_local_steered_logit() -> torch.Tensor:
-            """拒绝时采样用：只改 x 维（未除温度，与采样函数接口一致）。"""
+            """采样用：只改 x 维（未除温度，与采样函数接口一致）。"""
             steered = ctx.logit_target.clone()   # shape: [1, V_target]
             if alpha_t > 0.0:
                 steered[0, x] = steered[0, x] + alpha_t * (logit_dx - logit_bx)
             return steered
 
+        # ── Greedy 验收判据（修正）：x 在局部 steered 分布里是否成为 argmax ───
+        # 理由：P'_T(x) = P_T·ρ/(1 - P_T + P_T·ρ) 天然 ≤ 1，而 P_D(x) 经常 ∈
+        # [0.7, 0.95]，原 "p_accept_prime ≥ 1" 判据在 greedy 下极难触发——
+        # 会让 C13 退化为 standard SD greedy。改用 steered argmax 判据后，
+        # 只要 α_t·Δlogit(x) 能把 x 推到 top-1 即可 accept，语义与"logit 域
+        # 领域挟持"一致；同时与 C10/C11 全词表 PoE 的 greedy 行为保持对齐。
         if ctx.t_sample == 0.0:
-            if p_accept_prime >= 1.0:
+            steered         = _build_local_steered_logit()
+            steered_top1_id = _argmax_token(steered)
+            if steered_top1_id == x:
                 return AcceptResult(
                     accepted=True, chosen_token_id=x,
                     reason=f"c13_greedy_{reason_tag}_accepted",
                     delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
                 )
-            chosen = _argmax_token(_build_local_steered_logit())
             return AcceptResult(
-                accepted=False, chosen_token_id=chosen,
+                accepted=False, chosen_token_id=steered_top1_id,
                 reason=f"c13_greedy_{reason_tag}_rejected",
                 delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
             )
 
+        # ── 随机模式仍按 p_accept_prime = P'_T/P_D 概率验收 ─────────────
         if torch.rand(1).item() < p_accept_prime:
             return AcceptResult(
                 accepted=True, chosen_token_id=x,
@@ -2022,16 +2030,18 @@ class SoftGuidanceC14(AcceptanceStrategy):
                 steered[0, x] = steered[0, x] + alpha_t * (logit_dx - logit_bx)
             return steered
 
+        # Greedy 判据：与 C13 一致，改用 steered argmax（详见 C13 注释）
         if ctx.t_sample == 0.0:
-            if p_accept_prime >= 1.0:
+            steered         = _build_local_steered_logit()
+            steered_top1_id = _argmax_token(steered)
+            if steered_top1_id == x:
                 return AcceptResult(
                     accepted=True, chosen_token_id=x,
                     reason=f"c14_greedy_{reason_tag}_accepted",
                     delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
                 )
-            chosen = _argmax_token(_build_local_steered_logit())
             return AcceptResult(
-                accepted=False, chosen_token_id=chosen,
+                accepted=False, chosen_token_id=steered_top1_id,
                 reason=f"c14_greedy_{reason_tag}_rejected",
                 delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
             )
@@ -2182,16 +2192,23 @@ class SoftGuidanceC15(AcceptanceStrategy):
                 steered[0, x] = steered[0, x] + alpha_t * (logit_dx - logit_bx)
             return steered
 
+        # Greedy 判据：与 C13 一致，改用 steered argmax（详见 C13 注释）
+        # C15 专属注记：原 "p_accept_prime ≥ 1" 在 a* < 1 时必然 False——因为
+        # 反解目标就是让 P'_accept = a* < 1，所以 greedy 下永远拒绝，C15 会
+        # 彻底失效。改用 argmax 判据后：只要反解的 α_t 足以把 x 推到 top-1
+        # 即 accept，语义是"用最小的 α_t 达到 Draft 胜出"，与 a* 作为"软
+        # 胜出阈值"的思想自洽。
         if ctx.t_sample == 0.0:
-            if p_accept_prime >= 1.0:
+            steered         = _build_local_steered_logit()
+            steered_top1_id = _argmax_token(steered)
+            if steered_top1_id == x:
                 return AcceptResult(
                     accepted=True, chosen_token_id=x,
                     reason=f"c15_greedy_{reason_tag}_accepted",
                     delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
                 )
-            chosen = _argmax_token(_build_local_steered_logit())
             return AcceptResult(
-                accepted=False, chosen_token_id=chosen,
+                accepted=False, chosen_token_id=steered_top1_id,
                 reason=f"c15_greedy_{reason_tag}_rejected",
                 delta_p=delta_p, p_draft=p_draft, p_target=p_target_prime_x,
             )
