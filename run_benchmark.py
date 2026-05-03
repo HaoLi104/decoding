@@ -193,10 +193,24 @@ def _load_dataset(dataset_name: str, limit: int, split: str = "test", **kwargs) 
         raise ValueError(f"不支持的数据集: {dataset_name}，可选: medqa / gsm8k")
 
 
-def _format_prompt(item: Dict[str, Any], tokenizer, dataset_name: str) -> str:
-    """将样本格式化为 prompt 字符串。"""
+def _format_prompt(
+    item: Dict[str, Any],
+    tokenizer,
+    dataset_name: str,
+    prompt_mode: str = "baseline",
+) -> str:
+    """将样本格式化为 prompt 字符串。
+
+    prompt_mode:
+      "baseline" (默认): 与第一点 DSSD baseline 完全一致；
+      "thinking"       : DAF 第二点长推理 prompt（消融 / 重跑专用）。
+    """
     if dataset_name in {"medqa", "jecqa", "medmcqa"}:
-        return format_prompt(tokenizer, item["question"], item["options"], dataset_name=dataset_name)
+        return format_prompt(
+            tokenizer, item["question"], item["options"],
+            dataset_name=dataset_name,
+            prompt_mode=(None if prompt_mode == "baseline" else prompt_mode),
+        )
     elif dataset_name == "gsm8k":
         return (
             f"<|im_start|>system\nYou are a math problem solver. "
@@ -310,6 +324,7 @@ def run_pure_target_baseline(
     dataset_name: str,
     max_new_tokens: int,
     out_dir:      Path,
+    prompt_mode:  str = "baseline",
 ) -> BenchmarkResult:
     """用与投机解码完全相同的 model.forward() 手写循环跑纯 Target greedy。
 
@@ -365,7 +380,7 @@ def run_pure_target_baseline(
 
     for idx, item in enumerate(dataset):
         sample_id   = str(item.get("id", idx))
-        prompt_text = _format_prompt(item, tokenizer, dataset_name)
+        prompt_text = _format_prompt(item, tokenizer, dataset_name, prompt_mode=prompt_mode)
         prompt_ids  = tokenizer(prompt_text, return_tensors="pt")["input_ids"].to(device)
         prompt_len  = prompt_ids.shape[1]
 
@@ -479,6 +494,7 @@ def run_single_config(
     orch:       TriModelOrchestrator,
     dataset_name: str,
     out_dir:    Path,
+    prompt_mode: str = "baseline",
 ) -> BenchmarkResult:
     """在给定 DecodeConfig 下跑完整个数据集，返回汇总 BenchmarkResult。
 
@@ -538,7 +554,7 @@ def run_single_config(
         sample_id = str(item.get("id", idx))
 
         # 构造 prompt
-        prompt_text = _format_prompt(item, tokenizer, dataset_name)
+        prompt_text = _format_prompt(item, tokenizer, dataset_name, prompt_mode=prompt_mode)
         prompt_ids  = tokenizer(prompt_text, return_tensors="pt")["input_ids"]
         prompt_ids  = prompt_ids.to(device)
 
@@ -670,6 +686,7 @@ def run_grid_search(
     c4_tau:       float = 0.1,
     c14_decay:    float = 0.5,
     c15_alpha_max: float = 50.0,
+    prompt_mode:  str   = "baseline",
 ) -> List[BenchmarkResult]:
     """Strategy × α × T_sample 的正交网格搜索。
 
@@ -716,6 +733,7 @@ def run_grid_search(
                     orch=orch,
                     dataset_name=dataset_name,
                     out_dir=out_dir,
+                    prompt_mode=prompt_mode,
                 )
                 result.alpha = alpha  # 保留 -1 标记（无 α 策略）
                 all_results.append(result)
@@ -893,6 +911,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="在网格搜索前先跑纯 Target 手写循环基线，作为公平加速比的分母",
     )
+    p.add_argument(
+        "--prompt_mode", choices=["baseline", "thinking"], default="baseline",
+        help="baseline=与第一点严格一致的 prompt（默认）；"
+             "thinking=DAF 长推理 prompt（消融 / 重跑专用，不影响原有 baseline 结果）",
+    )
 
     return p
 
@@ -995,6 +1018,7 @@ def main() -> None:
             dataset_name=args.dataset,
             max_new_tokens=args.max_new_tokens,
             out_dir=out_dir,
+            prompt_mode=args.prompt_mode,
         )
 
     # 启动网格搜索
@@ -1023,6 +1047,7 @@ def main() -> None:
         c4_tau=args.c4_tau,
         c14_decay=args.c14_decay,
         c15_alpha_max=args.c15_alpha_max,
+        prompt_mode=args.prompt_mode,
     )
 
     # 与目录内已有单配置 summary 合并（续跑时 summary_table 含全部实验）
