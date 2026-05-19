@@ -5,3 +5,43 @@ __pycache__/
 .DS_Store
 LLaMA-Factory/
 MedReason/
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Local env / secrets
+.env
+.env.*
+*.pem
+*.key
+*.secret
+
+# Training / experiment outputs
+logs/
+outputs/
+results/
+checkpoints/
+runs/
+wandb/
+tensorboard/
+
+# Temporary / scratch files
+tmp/
+temp/
+scratch/
+*.tmp
+*.swp
+
+# Model and training artifacts
+*.pt
+*.pth
+*.bin
+*.ckpt
+*.safetensors
+
+# Local databases / misc
+*.sqlite
+*.db

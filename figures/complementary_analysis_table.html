@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<style>
+  body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; padding: 24px; }
+  h2 { color: #1f3a68; }
+  table { border-collapse: collapse; width: 100%; max-width: 720px; }
+  th, td { border: 1px solid #333; padding: 10px 12px; text-align: center; }
+  thead th { background: #1f3a68; color: #fff; font-weight: bold; }
+  tbody tr:nth-child(even) { background: #f8f9fb; }
+</style>
+</head>
+<body>
+<h2>互补性分析：通用大模型 vs 领域小模型</h2>
+<table>
+<thead><tr><th>维度</th><th>通用大模型（32B）</th><th>领域小模型（3B 微调）</th></tr></thead>
+<tbody><tr><td>复杂推理与任务理解</td><td>✅ 强</td><td>❌ 弱</td></tr><tr><td>语言生成流利度</td><td>✅ 强</td><td>⚠️ 中等</td></tr><tr><td>领域事实与规范一致性</td><td>❌ 不足</td><td>✅ 强</td></tr><tr><td>分布外泛化</td><td>✅ 强</td><td>❌ 弱</td></tr><tr><td>推理速度（单卡）</td><td>❌ 慢（~27 t/s）</td><td>✅ 快（~200 t/s）</td></tr></tbody>
+</table>
+<p style="color:#666;font-size:12px;">提示：拖选表格 Cmd+C → 粘贴到 Excel 或 Word → 再复制到 PPT，可得到可编辑表格。</p>
+</body>
+</html>
